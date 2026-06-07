@@ -15,7 +15,7 @@ ALL_THEMES = sorted(DAILY_THEMES | {"sexy"})
 SEND_TARGET = os.getenv("ZHUZHU_SEND_TARGET", "5509078392")
 SEND_CHANNEL = os.getenv("ZHUZHU_SEND_CHANNEL", "telegram")
 SEND_ACCOUNT = os.getenv("ZHUZHU_SEND_ACCOUNT", "default")
-FALLBACK_TEXT = "主人～猪猪的新照片来啦！"
+FALLBACK_TEXT = "主人～雪枫的新照片来啦！"
 
 
 

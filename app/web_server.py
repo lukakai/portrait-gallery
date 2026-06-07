@@ -41,7 +41,7 @@ BUILTIN_REFERENCE_MAP = {
 
 
 class GalleryServer:
-    """猪猪画廊 Web 服务器"""
+    """雪枫画廊 Web 服务器"""
 
     def __init__(self, config: dict, data_dir: str, config_path: str = ""):
         self.config = config
@@ -1231,6 +1231,7 @@ class GalleryServer:
             )
 
             activity = ""
+
             llm_config = self.config.get("llm", {})
             primary_model = (llm_config.get("model") or "deepseek-v4-pro").strip()
             fallback_model = (llm_config.get("fallback_model") or "deepseek-v4-flash").strip()

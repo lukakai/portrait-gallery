@@ -108,6 +108,7 @@ def _generate_via_direct_gpt(prompt: str, ref_image: Optional[str] = None, size:
     headers = {
         "Content-Type": "application/json",
         "Authorization": f"Bearer {api_key}",
+        "User-Agent": "PortraitGallery/1.0",
     }
 
     if ref_image:
@@ -140,8 +141,12 @@ def _generate_via_direct_gpt(prompt: str, ref_image: Optional[str] = None, size:
     timeout = IMG2IMG_TIMEOUT if ref_image else TEXT2IMG_TIMEOUT
     start = time.time()
 
+    # Create a dedicated session that bypasses system proxy (Surge/Stash)
+    _gpt_session = requests.Session()
+    _gpt_session.trust_env = False
+
     try:
-        resp = REQUEST_SESSION.post(
+        resp = _gpt_session.post(
             _get_gpt_base_url(),
             headers=headers,
             json=payload,

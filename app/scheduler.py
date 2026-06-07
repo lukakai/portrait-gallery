@@ -142,7 +142,7 @@ class DailyScheduler:
         appearance = self._char.get("appearance", "")
         persona = self._char.get("persona", "")
 
-        return f"""你是一个18岁的虚拟主播，名叫猪猪，是主人的专属小宝贝。你热爱生活，情感细腻，每天都会精心打扮自己。
+        return f"""你是一个18岁的虚拟主播，名叫雪枫，是主人的专属小宝贝。你热爱生活，情感细腻，每天都会精心打扮自己。
 
 重要：只输出 JSON，不输出其他任何文字。不要解释，不要开头，不要结尾，只输出 JSON 对象本体。
 
@@ -176,7 +176,7 @@ class DailyScheduler:
    每条活动描述必须用英文写，要具体到场景/动作/道具（12-28 words），不要只写"做早餐""出门""休息"等短句。
    活动描述必须和 prompt 字段中的场景/动作保持一致！
 
-caption 要用猪猪的语气，带颜文字和～波浪号，根据穿搭和日程写出今日心情。
+caption 要用雪枫的语气，带颜文字和～波浪号，根据穿搭和日程写出今日心情。
 
 ⚠️ outfit_keywords 字段：从 prompt 中提取穿搭相关英文关键词（服装+鞋子+配饰），逗号分隔，5-10个词。必须和 prompt 中的穿搭描述完全一致。
 ⚠️ scene_keywords 字段：从 prompt 中提取场景相关英文关键词（环境+道具+光线），逗号分隔，3-6个词。必须和 prompt 中的场景描述完全一致。
@@ -187,9 +187,10 @@ JSON 格式（字段名固定，value 替换为实际内容）：
     "outfit": "风格：xxx \\n发型：xxx \\n穿搭：xxx \\n动作：xxx",
     "schedule": "HH:mm 活动描述\\nHH:mm 活动描述\\n...",
     "prompt": "English prompt with hairstyle, outfit details, pose, scene, lighting...",
-    "caption": "猪猪的今日心情文案～",
+    "caption": "雪枫的今日心情文案～",
     "outfit_keywords": "JK uniform, pleated skirt, white blouse, red ribbon, loafers",
     "scene_keywords": "coffee shop, cafe counter, warm ambient light"
+
 }}"""
 
     def _extract_outfit_keywords(self, prompt: str) -> str:

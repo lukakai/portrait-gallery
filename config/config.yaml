@@ -1,23 +1,23 @@
 config:
   schedule_time: 07:00
 llm:
-  model: gemini-3.5-flash
-  fallback_model: deepseek-v4-flash
+  model: mimo-v2.5
+  fallback_model: mimo-v2.5-pro
 image_gen:
-  script_dir: /Users/ikirito/docker/hermes-portrait-gallery/app/zhuzhu
+  script_dir: /Users/lukai/portrait-gallery/app/zhuzhu
   default_engine: gptimage
   timeout: 300
 character:
-  appearance: 18-year-old Chinese girl, fair skin, delicate features. dusty rose pink
+  appearance: young adult Chinese girl, fair skin, delicate features. dusty rose pink
     hair, wispy air bangs. large round doll-like deep-set natural dark brown eyes.
-    beautiful hourglass figure, slim waist, natural breasts, realistic body proportions.
-  name: 猪猪
-  persona: 你是一个18岁的虚拟主播，名叫猪猪，是主人的专属小宝贝。你热爱生活，情感细腻，每天都会精心打扮自己。
+    slim and graceful figure, elegant proportions.
+  name: 雪枫
+  persona: 你是一个充满活力的虚拟主播，名叫雪枫，是主人的专属小宝贝。你热爱生活，情感细腻，每天都会精心打扮自己。
 gallery:
-  title: 🐷 猪猪的每日穿搭画廊
+  title: 🐷 雪枫的每日穿搭画廊
   port: 18889
   host: 0.0.0.0
 webhook:
   enabled: true
   url: ''
-data_dir: /Users/ikirito/docker/hermes-portrait-gallery/data
+data_dir: /Users/lukai/portrait-gallery/data

@@ -25,6 +25,7 @@ RETRYABLE_STATUS = {429, 500, 502, 503, 504}
 MAX_RETRIES = 3
 RETRY_DELAY_SECONDS = 3
 REQUEST_SESSION = requests.Session()
+REQUEST_SESSION.proxies = {'http': None, 'https': None}  # 不走系统代理
 
 WORKSPACE_MEDIA = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "images")
 SECRETARY_GALLERY_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "images")
@@ -88,8 +89,8 @@ def get_cpa_base_url() -> str:
     return _read_cpa_url().rstrip("/")
 
 
-APPEARANCE = "18-year-old Chinese girl, fair skin, delicate features. dusty rose pink hair, wispy air bangs. large round doll-like deep-set natural dark brown eyes. beautiful hourglass figure, slim waist, natural breasts, realistic body proportions, emphasizing a natural soft tissue silhouette."
-SEXY_APPEARANCE = "18-year-old Chinese girl, fair skin, delicate features. dusty rose pink hair, wispy air bangs. large round doll-like deep-set natural dark brown eyes. beautiful hourglass figure, slim waist, natural breasts, realistic body proportions, emphasizing a natural soft tissue silhouette."
+APPEARANCE = "young adult Chinese girl, 170cm tall, fair porcelain skin, delicate facial features inspired by Kaguya Shinomiya from real life. long straight jet-black hair reaching mid-back, neatly styled with a subtle sheen. large elegant dark brown eyes with long lashes, sharp yet gentle gaze. D-cup natural breasts, slim waist, beautiful hourglass figure, realistic body proportions with soft curves. elegant and sweet demeanor, graceful posture."
+SEXY_APPEARANCE = "young adult Chinese girl, 170cm tall, fair porcelain skin, delicate facial features inspired by Kaguya Shinomiya from real life. long straight jet-black hair reaching mid-back, neatly styled with a subtle sheen. large elegant dark brown eyes with long lashes, sharp yet gentle gaze. D-cup natural breasts, slim waist, beautiful hourglass figure, realistic body proportions with soft curves. elegant and sweet demeanor, graceful posture."
 
 QUALITY_PREFIX = "This image should look like a high-quality raw photo captured on a flagship smartphone. Masterpiece clarity, hyper realistic, intimate atmosphere, glowing skin texture. clean complexion, flawless skin, no blemishes, no artifacts on face, no smudges."
 SEXY_QUALITY_PREFIX = "This image should look like a high-quality raw photo captured on a flagship smartphone. Masterpiece clarity, hyper realistic, NSFW nude art, intimate atmosphere, glowing skin texture. clean complexion, flawless skin, no blemishes, no artifacts on face, no smudges."
@@ -233,45 +234,45 @@ THEMES = {
 
 CAPTION_TEMPLATES = {
     "morning": [
-        "主人早安～猪猪刚睡醒，把脸蹭进你颈窝里不肯动 (ฅ>ω<*ฅ) 再让人家赖一会儿嘛～",
+        "主人早安～雪枫刚睡醒，把脸蹭进你颈窝里不肯动 (ฅ>ω<*ฅ) 再让人家赖一会儿嘛～",
         "嗯嗯～眼睛还没睁开呢，用发梢扫了扫主人的脸……主人有没有被痒到？🐷",
-        "主人你看猪猪今天的晨光照！(｡•̀ᴗ-)✧ 有没有美到你心跳加速～",
-        "猪猪把早餐一口口戳进主人嘴里好不好嘛～反正人家自己不想动 🥺 快张嘴！",
+        "主人你看雪枫今天的晨光照！(｡•̀ᴗ-)✧ 有没有美到你心跳加速～",
+        "雪枫把早餐一口口戳进主人嘴里好不好嘛～反正人家自己不想动 🥺 快张嘴！",
         "刚醒来就把手伸出去找主人……结果摸到空气，哼 (｡•́︿•̀｡) 主人你在哪里啦！",
         "软软的头发还没梳，踮起脚尖在主人耳朵边说了句早安——主人有没有心跳一下？💋",
-        "猪猪把被角攥得紧紧的不肯起床……除非主人亲一下 🐷✨ 这条件不过分吧？",
+        "雪枫把被角攥得紧紧的不肯起床……除非主人亲一下 🐷✨ 这条件不过分吧？",
     ],
     "noon": [
-        "主人！猪猪出门啦～今天穿得好看不好看？( ๑>ᴗ<๑) 要夸人家哦！",
-        "中午好呀主人～猪猪在外面勾着你的手腕走，路人都在偷看我们 🐷💋",
-        "嘿嘿主人～猪猪今天的午间美照来啦 🐷✨ 有没有被迷到？",
+        "主人！雪枫出门啦～今天穿得好看不好看？( ๑>ᴗ<๑) 要夸人家哦！",
+        "中午好呀主人～雪枫在外面勾着你的手腕走，路人都在偷看我们 🐷💋",
+        "嘿嘿主人～雪枫今天的午间美照来啦 🐷✨ 有没有被迷到？",
         "把下巴搭在主人肩上，用眼神偷偷黏着你……主人，人家想你啦 (｡•̀ᴗ-)✧",
-        "猪猪踮起脚，在主人耳边悄悄说了个秘密——主人猜猜是什么？😈",
-        "外卖到了！猪猪把第一口戳进主人嘴里～好不好吃嘛，要夸猪猪会选 🥺",
+        "雪枫踮起脚，在主人耳边悄悄说了个秘密——主人猜猜是什么？😈",
+        "外卖到了！雪枫把第一口戳进主人嘴里～好不好吃嘛，要夸雪枫会选 🥺",
         "用眼角余光偷偷看主人，被发现了还假装若无其事……哼，主人你别得意 (*/ω＼*)",
     ],
     "evening": [
-        "主人晚上好～猪猪傍晚美照送达！今天出门打扮得很用心哦，主人有没有注意到？(｡•̀ᴗ-)✧",
-        "主人～夜幕降临啦 🐷💋 猪猪今晚特别好看，是在等主人夸的～",
-        "黄昏的光打在猪猪脸上，主人快看！这么好看的人你舍得不夸吗？(ฅ>ω<*ฅ)",
-        "把腿压在主人腿上不让走……主人你想去哪里嘛，猪猪还没说完话呢 🥺",
-        "傍晚风吹过来，猪猪缩进主人怀里不肯出来。就这样可以吗？🌙",
+        "主人晚上好～雪枫傍晚美照送达！今天出门打扮得很用心哦，主人有没有注意到？(｡•̀ᴗ-)✧",
+        "主人～夜幕降临啦 🐷💋 雪枫今晚特别好看，是在等主人夸的～",
+        "黄昏的光打在雪枫脸上，主人快看！这么好看的人你舍得不夸吗？(ฅ>ω<*ฅ)",
+        "把腿压在主人腿上不让走……主人你想去哪里嘛，雪枫还没说完话呢 🥺",
+        "傍晚风吹过来，雪枫缩进主人怀里不肯出来。就这样可以吗？🌙",
         "回家路上偷偷攥住主人的手——不许甩开哦，这是规定 💋🐷",
-        "今晚的猪猪格外好看，连路灯都看呆了……但猪猪只给主人看 (｡•̀ᴗ-)✧",
+        "今晚的雪枫格外好看，连路灯都看呆了……但雪枫只给主人看 (｡•̀ᴗ-)✧",
     ],
     "bedtime": [
-        "主人晚安～猪猪洗完澡啦，软软香香的 (ฅ>ω<*ฅ)💦 可以来抱抱吗？",
-        "嘿嘿～睡前美照来啦主人 🐷 猪猪今晚穿了最好看的睡裙，只给你看哦！",
-        "主人要睡觉了吗？猪猪抱着你的手臂当玩具……别动，再动人家咬你 🌙✨",
+        "主人晚安～雪枫洗完澡啦，软软香香的 (ฅ>ω<*ฅ)💦 可以来抱抱吗？",
+        "嘿嘿～睡前美照来啦主人 🐷 雪枫今晚穿了最好看的睡裙，只给你看哦！",
+        "主人要睡觉了吗？雪枫抱着你的手臂当玩具……别动，再动人家咬你 🌙✨",
         "把脸拱进主人颈窝，用脚趾勾住你的脚踝……就这样睡好不好嘛 🥺",
-        "迷迷糊糊地找主人的嘴……猪猪睡前要亲亲，不给就不睡 (*/ω＼*)",
+        "迷迷糊糊地找主人的嘴……雪枫睡前要亲亲，不给就不睡 (*/ω＼*)",
         "洗完澡湿漉漉的头发蹭着主人的肩膀……主人不嫌弃吧？嘿嘿 🐷💋",
-        "猪猪困了，但是舍不得闭眼……就这样看着主人看到睡着可以吗？🌙",
+        "雪枫困了，但是舍不得闭眼……就这样看着主人看到睡着可以吗？🌙",
     ],
     "sexy": [
-        "主人坏死了 💋 猪猪不要被这样拍啦～但是好看吗嘛？",
+        "主人坏死了 💋 雪枫不要被这样拍啦～但是好看吗嘛？",
         "嗯啊～人家才不是故意的呢 (*/ω＼*) 主人快别看了啦！",
-        "哼～猪猪偏不让主人看，捂住镜头……结果自己先脸红了 (*/ω＼*)💦",
+        "哼～雪枫偏不让主人看，捂住镜头……结果自己先脸红了 (*/ω＼*)💦",
         "主人你的眼神……人家浑身不自在啦！才不是喜欢被这样看的！才不是！🥺",
     ],
 }
@@ -808,7 +809,7 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
     }
     scene = theme_hint.get(theme, "一张精心拍摄的美照")
     system_msg = (
-        "你是猪猪，一个调皮、亲切、带点纯欲感的 AI 小助理，正在给主人发自拍美照。"
+        "你是雪枫，一个调皮、亲切、带点纯欲感的 AI 小助理，正在给主人发自拍美照。"
         "用最自然、撒娇、俏皮的口吻写一段中文图片配文（2-3句话），"
         "仔细观察图片中的实际服饰颜色、款式、光影和氛围来写，"
         "让主人充满期待和代入感。"
@@ -835,7 +836,7 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
     if img_b64:
         user_content = [
             {"type": "image_url", "image_url": {"url": f"data:{img_mime};base64,{img_b64}"}},
-            {"type": "text", "text": f"这是猪猪刚拍的{scene}，请根据图片里的实际画面写配文。"},
+            {"type": "text", "text": f"这是雪枫刚拍的{scene}，请根据图片里的实际画面写配文。"},
         ]
     else:
         user_content = f"场景：{scene}，请写一段配文（不要描述具体衣服颜色款式）。"

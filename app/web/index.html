@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>猪猪的每日穿搭画廊</title>
+<title>雪枫的每日穿搭画廊</title>
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐷</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -1576,7 +1576,7 @@ body {
 
 <div class="header">
   <div class="header-left">
-    <h1 style="user-select:none;" onclick="openScheduleEgg()">🐷 猪猪穿搭画廊 <span style="font-size:12px;color:#999;font-weight:400;" id="versionTag">v1.0.9</span></h1>
+    <h1 style="user-select:none;" onclick="openScheduleEgg()">🐷 雪枫穿搭画廊 <span style="font-size:12px;color:#999;font-weight:400;" id="versionTag">v1.0.9</span></h1>
   </div>
   <div class="header-right">
     <div class="tabs">
@@ -1594,13 +1594,13 @@ body {
   <!-- Today Card -->
   <div class="today-section" id="todaySection">
     <div class="today-hero-title">
-      <h2><span class="pig-emoji">🐷</span> 猪猪的每日穿搭画廊</h2>
-      <div class="subtitle">每一天，都是不一样的猪猪 <span class="heart">💞</span></div>
+      <h2><span class="pig-emoji">🐷</span> 雪枫的每日穿搭画廊</h2>
+      <div class="subtitle">每一天，都是不一样的雪枫 <span class="heart">💞</span></div>
       <button class="gen-today-btn" onclick="triggerGenerate()">💭 现在在干嘛</button>
     </div>
     <div class="today-empty" id="todayEmpty" style="display:none;">
       <div class="icon">🌸</div>
-      <p>今天还没有穿搭记录呢～让猪猪生成一个吧！</p>
+      <p>今天还没有穿搭记录呢～让雪枫生成一个吧！</p>
     </div>
     <div class="gallery-list" id="todayList"></div>
   </div>
@@ -1608,7 +1608,7 @@ body {
   <!-- Gallery Grid -->
   <div class="gallery-section hidden" id="gallerySection">
     <div id="galleryContent">
-      <div class="loading-state"><div class="spinner"></div>猪猪在整理衣橱...</div>
+      <div class="loading-state"><div class="spinner"></div>雪枫在整理衣橱...</div>
     </div>
   </div>
 
@@ -1693,7 +1693,7 @@ body {
     <h2>🎀 穿搭生成</h2>
     <div class="cg-field">
       <label for="cgPrompt">穿搭描述</label>
-      <textarea id="cgPrompt" placeholder="描述你想看到的猪猪穿搭，比如：穿着粉色JK制服在樱花树下吃团子~" rows="3"></textarea>
+      <textarea id="cgPrompt" placeholder="描述你想看到的雪枫穿搭，比如：穿着粉色JK制服在樱花树下吃团子~" rows="3"></textarea>
       <div class="hint">支持中英文，越详细效果越好哦～</div>
     </div>
     <div class="cg-field">
@@ -1855,7 +1855,7 @@ function switchTab(tab) {
 async function triggerGenerate() {
   const btn = document.querySelector(".gen-today-btn");
   btn.disabled = true;
-  btn.textContent = "⏳ 猪猪在打扮...";
+  btn.textContent = "⏳ 雪枫在打扮...";
   showToast("💭 正在根据现在的时间段生图～");
   
   try {
@@ -1867,7 +1867,7 @@ async function triggerGenerate() {
     if (data.error) {
       showToast("❌ " + data.error);
     } else {
-      showToast("✨ 猪猪来啦～");
+      showToast("✨ 雪枫来啦～");
       await loadGallery();
     }
   } catch(e) {
@@ -2412,7 +2412,7 @@ let currentModalImg = '';
 function openModal(e) {
   if (!e.image_filename) return;
   currentModalImg = e.image_filename;
-  document.getElementById("modalImageWrap").innerHTML = `<img src="/images/${e.image_filename}" alt="${e.caption || '猪猪穿搭'}" onclick="openFullscreenImg('/images/${e.image_filename}')">`;
+  document.getElementById("modalImageWrap").innerHTML = `<img src="/images/${e.image_filename}" alt="${e.caption || '雪枫穿搭'}" onclick="openFullscreenImg('/images/${e.image_filename}')">`;
   document.getElementById("modalDate").textContent = formatDate(e.date) + (e.time ? ' ' + e.time : '');
   const styleEl = document.getElementById("modalStyle");
   if (e.outfit_style) { styleEl.textContent = e.outfit_style; styleEl.style.display = "inline-block"; }
@@ -2545,7 +2545,7 @@ function shareImage(imgId, event) {
   if (event) event.stopPropagation();
   const url = `${location.origin}/images/${imgId}`;
   if (navigator.share) {
-    navigator.share({ title: '猪猪穿搭', url }).catch(() => {});
+    navigator.share({ title: '雪枫穿搭', url }).catch(() => {});
   } else {
     navigator.clipboard.writeText(url).then(() => {
       showToast("📤 链接已复制到剪贴板");
@@ -2676,7 +2676,7 @@ async function submitCustomGen() {
   const refImage = refItem ? refItem.dataset.ref : "";
   
   const btn = document.getElementById("cgSubmitBtn");
-  btn.disabled = true; btn.textContent = "⏳ 猪猪在打扮...";
+  btn.disabled = true; btn.textContent = "⏳ 雪枫在打扮...";
   showToast("🌸 按主人要求打扮去啦～");
   
   try {
@@ -2690,7 +2690,7 @@ async function submitCustomGen() {
     const data = await res.json();
     if (data.error) showToast("❌ " + data.error);
     else {
-      showToast("✨ 主人定制的猪猪出炉啦！");
+      showToast("✨ 主人定制的雪枫出炉啦！");
       closeCustomGen();
       document.getElementById("cgPrompt").value = "";
       await loadGallery();
@@ -3068,7 +3068,7 @@ function themeLabel(t) {
 function loadScheduleEggData() {
   var body = document.getElementById('eggBody');
   var dateEl = document.getElementById('eggDate');
-  body.innerHTML = '<div class="egg-loading">🔮 正在窥探猪猪的日程秘密...</div>';
+  body.innerHTML = '<div class="egg-loading">🔮 正在窥探雪枫的日程秘密...</div>';
 
   // 并行拉取日程详情、今日照片和真实待执行生图任务
   var apiSuffix = apiKeyQuery();
@@ -3308,7 +3308,7 @@ function loadScheduleEggData() {
 
     // ===== 心情文案 =====
     if (detail.caption) {
-      html += '<div class="egg-section"><div class="egg-section-title"><span class="icon">💭</span>猪猪的心思</div><div class="egg-caption">' + escapeHtml(detail.caption) + '</div></div>';
+      html += '<div class="egg-section"><div class="egg-section-title"><span class="icon">💭</span>雪枫的心思</div><div class="egg-caption">' + escapeHtml(detail.caption) + '</div></div>';
     }
 
     if (!html) {
