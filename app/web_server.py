@@ -17,6 +17,15 @@ import uuid
 from aiohttp import web
 
 from store import ScheduleStore
+from settings import (
+    build_child_env,
+    configured_python,
+    llm_request_config,
+    resolve_builtin_reference_dir,
+    resolve_project_root,
+    resolve_reference_dir,
+    resolve_script_dir,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +35,7 @@ DEFAULT_PHOTO_JOB_LIMIT = 6
 MIN_PHOTO_JOB_LIMIT = 1
 MAX_PHOTO_JOB_LIMIT = 6
 TODAY_PHOTO_SOURCES = {"cron", "web"}
+FAILED_SCHEDULE_TEXT = "生成失败"
 REFERENCE_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
 REFERENCE_MIME_EXTENSIONS = {
     "image/jpeg": ".jpg",
@@ -52,8 +62,8 @@ class GalleryServer:
         self.port = self.gallery_config.get("port", 18888)
         self.token = self.gallery_config.get("token", "")
         self.image_dir = os.path.join(data_dir, "images")
-        self.app_reference_dir = os.path.join(os.path.dirname(__file__), "references")
-        self.reference_dir = os.path.join(data_dir, "references")
+        self.app_reference_dir = resolve_builtin_reference_dir(config, config_path)
+        self.reference_dir = resolve_reference_dir(config, data_dir, config_path)
         self.uploaded_reference_dir = os.path.join(self.reference_dir, "uploads")
         self.legacy_uploaded_reference_dir = os.path.join(self.app_reference_dir, "uploads")
         os.makedirs(self.image_dir, exist_ok=True)
@@ -67,6 +77,7 @@ class GalleryServer:
         self.on_list_photo_jobs = None
         self.on_refresh_schedule = None
         self.on_rebuild_photo_jobs = None
+        self.on_retry_photo_job = None
 
         self.app = web.Application(middlewares=[self.api_key_middleware])
         self._setup_routes()
@@ -122,6 +133,7 @@ class GalleryServer:
         # 日程彩蛋
         self.app.router.add_get("/api/schedule-detail", self.handle_schedule_detail)
         self.app.router.add_get("/api/photo-jobs", self.handle_photo_jobs)
+        self.app.router.add_post("/api/photo-jobs/retry", self.handle_retry_photo_job)
         self.app.router.add_get("/api/photo-job-limit", self.handle_photo_job_limit)
         self.app.router.add_post("/api/photo-job-limit", self.handle_photo_job_limit)
 
@@ -147,6 +159,73 @@ class GalleryServer:
 
     def _plugin_config_path(self) -> str:
         return os.path.join(self.data_dir, "plugin_config.json")
+
+    def _api_keys_config_path(self) -> str:
+        return os.path.join(self.data_dir, "api_keys_config.json")
+
+    def _load_api_keys_config(self) -> dict:
+        path = self._api_keys_config_path()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception as e:
+            logger.error(f"Load API keys config error: {e}")
+            return {}
+
+    def _github_proxy(self) -> str:
+        """Return the effective GitHub-only proxy URL, if configured."""
+        keys = self._load_api_keys_config()
+        update_config = self.config.get("update", {}) if isinstance(self.config.get("update"), dict) else {}
+        for value in (
+            keys.get("github_proxy"),
+            os.getenv("GITHUB_PROXY"),
+            update_config.get("github_proxy"),
+        ):
+            proxy = str(value or "").strip()
+            if proxy:
+                return proxy
+        return ""
+
+    def _github_proxy_env(self) -> dict[str, str]:
+        proxy = self._github_proxy()
+        if not proxy:
+            return {}
+        return {
+            "HTTP_PROXY": proxy,
+            "HTTPS_PROXY": proxy,
+            "http_proxy": proxy,
+            "https_proxy": proxy,
+        }
+
+    def _load_plugin_config(self) -> dict:
+        path = self._plugin_config_path()
+        if not os.path.exists(path):
+            return {}
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return json.load(f) or {}
+        except Exception as e:
+            logger.error(f"Load plugin config error: {e}")
+            return {}
+
+    def _has_image_generation_key(self) -> bool:
+        keys = self._load_api_keys_config()
+        if keys.get("gpt_key") or os.getenv("GPT_IMAGE_API_KEY"):
+            return True
+        plugin_config = self._load_plugin_config()
+        gitee_keys = plugin_config.get("gitee_config", {}).get("api_keys", [])
+        return bool(gitee_keys and gitee_keys[0])
+
+    def _python_executable(self) -> str:
+        return configured_python(self.config) or sys.executable
+
+    def _generate_script(self) -> str:
+        return os.path.join(resolve_script_dir(self.config, self.config_path), "generate.py")
+
+    def _child_env(self, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
+        return build_child_env(self.config, self.config_path, self.data_dir, extra)
 
     @staticmethod
     def _clamp_photo_job_limit(value) -> int:
@@ -246,6 +325,29 @@ class GalleryServer:
             logger.error(f"Load photo jobs error: {e}")
             return web.json_response({"error": str(e), "jobs": []}, status=500)
 
+    async def handle_retry_photo_job(self, request: web.Request):
+        """Queue a retry for a missed/failed dynamic photo job."""
+        if not self.on_retry_photo_job:
+            return web.json_response({"error": "retry_unavailable"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        raw_time = str(body.get("time") or body.get("schedule_time") or "").strip()
+        match = re.match(r'^\s*(\d{1,2}):(\d{2})', raw_time)
+        if not match:
+            return web.json_response({"error": "invalid_time"}, status=400)
+
+        schedule_time = f"{int(match.group(1)):02d}:{int(match.group(2)):02d}"
+        try:
+            result = await self.on_retry_photo_job(schedule_time)
+            status = result.get("status") if isinstance(result, dict) else ""
+            http_status = 400 if status == "error" else 200
+            return web.json_response(result, status=http_status)
+        except Exception as e:
+            logger.error(f"Retry photo job error: {e}", exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
     async def handle_photo_job_limit(self, request: web.Request):
         """Read or update the daily dynamic photo-job limit."""
         if request.method == "GET":
@@ -287,8 +389,10 @@ class GalleryServer:
         try:
             entry = await self.on_refresh_schedule()
             if entry and entry.status == "ok":
+                source = getattr(entry, "source", "") or ""
                 return web.json_response({
-                    "status": "ok",
+                    "status": "preserved" if source == "preserved" else "ok",
+                    "message": "LLM 暂不可用，已保留当前今日日程。" if source == "preserved" else "日程已刷新。",
                     "entry": entry.to_dict(),
                 })
             return web.json_response({
@@ -338,15 +442,20 @@ class GalleryServer:
             except Exception as e:
                 logger.error(f"Load config.yaml error: {e}")
 
+        image_config = self.config.get("image_gen", {})
+        llm_config = self.config.get("llm", {})
+
         # 返回 masked 状态
         return web.json_response({
             "gitee_key": self._mask_key(gitee_key),
             "gpt_key": self._mask_key(keys_config.get("gpt_key", "")),
-            "gpt_base_url": keys_config.get("gpt_base_url", ""),
-            "cpa_url": keys_config.get("cpa_url", ""),
+            "gpt_base_url": keys_config.get("gpt_base_url", "") or image_config.get("gpt_base_url", ""),
+            "cpa_url": keys_config.get("cpa_url", "") or llm_config.get("base_url", ""),
             "cpa_key": self._mask_key(keys_config.get("cpa_key", "")),
             "appearance": keys_config.get("appearance", ""),
+            "github_proxy": self._github_proxy(),
             "llm_model": llm_model,
+            "llm_models": self.config.get("llm", {}),
             "gitee_fallback_enabled": gitee_fallback_enabled,
         })
     
@@ -405,7 +514,7 @@ class GalleryServer:
             or len(current_clothing) < 10
         ):
             parts["穿搭"] = clothing
-        if scene and not parts.get("场景"):
+        if scene and not parts.get("场景") and re.search(r'[\u4e00-\u9fff]', scene):
             parts["场景"] = scene
         return parts
 
@@ -433,6 +542,15 @@ class GalleryServer:
     @staticmethod
     def _is_today_photo_source(source: str) -> bool:
         return source in TODAY_PHOTO_SOURCES
+
+    @staticmethod
+    def _has_usable_schedule(entry: dict) -> bool:
+        return (
+            isinstance(entry, dict)
+            and bool((entry.get("schedule") or "").strip())
+            and entry.get("schedule") != FAILED_SCHEDULE_TEXT
+            and entry.get("status") == "ok"
+        )
 
     @staticmethod
     def _photo_schedule_activity(entry: dict) -> str:
@@ -514,6 +632,7 @@ class GalleryServer:
             "Masterpiece clarity",
             "high-quality raw photo",
             "glowing skin texture",
+            "未检测到服装",
         )
         return any(marker in outfit for marker in broken_markers)
 
@@ -530,8 +649,12 @@ class GalleryServer:
         phrase_map = [
             (["light gray", "knit", "cardigan"], "浅灰色针织开衫"),
             (["gray", "knit", "cardigan"], "灰色针织开衫"),
+            (["white", "lace", "camisole"], "白色蕾丝吊带睡裙"),
+            (["lace", "camisole"], "蕾丝吊带睡裙"),
             (["pink", "lace", "camisole dress"], "粉色蕾丝吊带裙"),
             (["camisole dress"], "吊带裙"),
+            (["sleep", "dress"], "睡裙"),
+            (["duvet"], "柔软白色被子"),
             (["mary jane"], "玛丽珍鞋"),
             (["lace", "ankle socks"], "蕾丝短袜"),
             (["heart", "necklace"], "爱心项链"),
@@ -647,6 +770,9 @@ class GalleryServer:
                     # appearance: always update (empty string = remove local appearance)
                     if "appearance" in body:
                         keys_config["appearance"] = body["appearance"]
+                    # GitHub proxy is local-only and may be cleared with an empty string.
+                    if "github_proxy" in body:
+                        keys_config["github_proxy"] = str(body["github_proxy"] or "").strip()
                     
                     # 写入 api_keys_config.json
                     with open(api_keys_path, 'w', encoding='utf-8') as f:
@@ -707,25 +833,22 @@ class GalleryServer:
         """获取 CPA 可用模型列表"""
         try:
             import requests
-            # 从 api_keys_config.json 读取 CPA 配置
-            cpa_url = "http://127.0.0.1:8327"
-            cpa_key = ""
-            api_keys_path = os.path.join(self.data_dir, "api_keys_config.json")
-            if os.path.exists(api_keys_path):
-                try:
-                    with open(api_keys_path, 'r') as f:
-                        keys = json.load(f)
-                    if keys.get("cpa_url"):
-                        cpa_url = keys["cpa_url"].rstrip("/").replace("/v1", "")
-                    cpa_key = keys.get("cpa_key", "")
-                except Exception:
-                    pass
-            
+            request_config = llm_request_config(self.config, self.data_dir)
+            base_url = request_config["base_url"].rstrip("/")
+            cpa_key = request_config["api_key"]
+            if not base_url:
+                return web.json_response({"models": [], "error": "CPA URL 未配置"})
+
+            if base_url.endswith("/chat/completions"):
+                base_url = base_url[: -len("/chat/completions")]
+            if not base_url.endswith("/v1"):
+                base_url = f"{base_url}/v1"
+
             headers = {}
             if cpa_key:
                 headers["Authorization"] = f"Bearer {cpa_key}"
             
-            resp = requests.get(f"{cpa_url}/v1/models", headers=headers, timeout=5)
+            resp = requests.get(f"{base_url}/models", headers=headers, timeout=5)
             if resp.status_code == 200:
                 data = resp.json()
                 models = sorted([m["id"] for m in data.get("data", [])])
@@ -748,12 +871,12 @@ class GalleryServer:
             # 1. 获取日程信息（从日期 key 或图片条目）
             schedule_info = {}
             for key, e in all_data.items():
-                if key == today_str and e.get("schedule"):
+                if key == today_str and self._has_usable_schedule(e):
                     schedule_info = e
                     break
             if not schedule_info:
                 for key, e in all_data.items():
-                    if e.get("date") == today_str and e.get("schedule") and e.get("status") == "ok":
+                    if e.get("date") == today_str and self._has_usable_schedule(e):
                         schedule_info = e
                         break
 
@@ -822,7 +945,7 @@ class GalleryServer:
             # 查找今日日程（日期 key 或图片条目）
             schedule_entry = None
             # 优先找日期 key（有 schedule 内容的）
-            if today_str in all_data and all_data[today_str].get("schedule"):
+            if today_str in all_data and self._has_usable_schedule(all_data[today_str]):
                 schedule_entry = all_data[today_str]
             # 再找有 schedule 的图片条目
             if not schedule_entry:
@@ -830,8 +953,7 @@ class GalleryServer:
                     if (
                         isinstance(e, dict)
                         and e.get("date") == today_str
-                        and e.get("schedule")
-                        and e.get("status") == "ok"
+                        and self._has_usable_schedule(e)
                         and self._is_today_photo_source(e.get("source", ""))
                     ):
                         schedule_entry = e
@@ -1178,6 +1300,86 @@ class GalleryServer:
                 return web.json_response({"error": str(e)}, status=500)
         return web.json_response({"error": "no_generator"}, status=500)
 
+    @staticmethod
+    def _has_cjk(value: str) -> bool:
+        return bool(re.search(r'[\u4e00-\u9fff]', value or ""))
+
+    def _parse_generate_now_llm(self, text: str) -> tuple[str, str, str]:
+        raw = (text or "").strip()
+        raw = raw.replace("```json", "").replace("```", "").strip()
+        activity = ""
+        image_prompt = ""
+        outfit_prompt = ""
+
+        start = raw.find("{")
+        end = raw.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            try:
+                data = json.loads(raw[start:end + 1])
+                activity = str(data.get("activity_zh") or data.get("activity") or "").strip()
+                image_prompt = str(
+                    data.get("image_prompt_en")
+                    or data.get("prompt_en")
+                    or data.get("image_prompt")
+                    or ""
+                ).strip()
+                outfit_prompt = str(
+                    data.get("outfit_en")
+                    or data.get("clothing_en")
+                    or data.get("outfit")
+                    or ""
+                ).strip()
+            except json.JSONDecodeError:
+                pass
+
+        if not activity and not image_prompt and raw:
+            if self._has_cjk(raw):
+                activity = raw
+            else:
+                image_prompt = raw
+
+        activity = re.sub(r'\s+', ' ', activity).strip().strip('"').strip("'")
+        activity = re.sub(r'^\d{1,2}:\d{2}\s*', '', activity).strip()
+        image_prompt = re.sub(r'\s+', ' ', image_prompt).strip().strip('"').strip("'")
+        if self._has_cjk(image_prompt):
+            image_prompt = ""
+        outfit_prompt = re.sub(r'\s+', ' ', outfit_prompt).strip().strip('"').strip("'")
+        if self._has_cjk(outfit_prompt):
+            outfit_prompt = ""
+        return activity, image_prompt, outfit_prompt
+
+    def _fallback_generate_now_context(self, now_str: str, schedule_text: str = "") -> tuple[str, str, str]:
+        time_value, nearest_activity = "", ""
+        target_time, _ = self._parse_time_activity(now_str)
+        if target_time and schedule_text:
+            target_score = self._time_sort_value(target_time)
+            candidates = []
+            for line in schedule_text.splitlines():
+                item_time, activity = self._parse_time_activity(line)
+                if item_time and activity:
+                    candidates.append((abs(self._time_sort_value(item_time) - target_score), activity))
+            if candidates:
+                _, nearest_activity = min(candidates, key=lambda item: item[0])
+
+        hour = int((target_time or now_str or "00:00").split(":", 1)[0])
+        if 0 <= hour < 6 or hour >= 22:
+            activity = nearest_activity or "在柔软床边安静放松准备入睡"
+            prompt = "relaxing beside a soft bed late at night, sleepy gentle expression, cozy bedroom, warm bedside lamp, quiet intimate atmosphere"
+            outfit = "soft white lace camisole sleep dress, delicate lace trim, partly covered by a white duvet"
+        elif hour < 11:
+            activity = nearest_activity or "在晨光里整理今天的穿搭"
+            prompt = "arranging today's outfit in soft morning light, relaxed natural pose, tidy bedroom mirror, warm calm atmosphere"
+            outfit = "cream knit cardigan, white camisole top, light blue pleated skirt, beige mary jane shoes"
+        elif hour < 18:
+            activity = nearest_activity or "在午后阳光里享受轻松日常"
+            prompt = "enjoying a relaxed afternoon moment, casual natural pose, bright cafe or city street setting, clean daylight atmosphere"
+            outfit = "fitted crop top, high-waisted wide-leg trousers, small shoulder bag, simple earrings"
+        else:
+            activity = nearest_activity or "在傍晚灯光下散步放松"
+            prompt = "taking a relaxed evening walk under warm city lights, gentle candid pose, softly glowing street scene, cozy dusk atmosphere"
+            outfit = "elegant satin slip dress, sheer lace cardigan, delicate necklace, low heels"
+        return activity, prompt, outfit
+
     async def handle_generate_now(self, request: web.Request):
         """根据当前精确时间动态生图 (💭 现在在干嘛)"""
         proc = None
@@ -1197,50 +1399,46 @@ class GalleryServer:
                 all_data = store.load()
                 today_str = now.strftime("%Y-%m-%d")
                 daily = all_data.get(today_str, {})
-                schedule_text = daily.get("schedule", "") if isinstance(daily, dict) else ""
+                if self._has_usable_schedule(daily):
+                    schedule_text = daily.get("schedule", "")
             except Exception:
                 pass
 
+            keys_config = self._load_api_keys_config()
+            plugin_config = self._load_plugin_config()
+            gpt_key = keys_config.get("gpt_key", "") or os.environ.get("GPT_IMAGE_API_KEY", "")
+            gpt_base_url = keys_config.get("gpt_base_url", "") or os.environ.get("GPT_IMAGE_BASE_URL", "")
+            gitee_keys = plugin_config.get("gitee_config", {}).get("api_keys", [])
+            gitee_key = gitee_keys[0] if gitee_keys else ""
+            if not gpt_key and not gitee_key:
+                return web.json_response({
+                    "error": "missing_image_key",
+                    "message": "请先在设置里配置 GPT Image Key 或 Gitee Key，再使用“现在在干嘛”。",
+                }, status=400)
+
             # 2) 用 LLM 根据精确时间生成活动描述
             import urllib.request
-            cpa_base_url = os.environ.get("CPA_BASE_URL", "http://127.0.0.1:8327/v1").rstrip("/")
-            cpa_key = ""
-            try:
-                cfg_path = os.path.join(self.data_dir, "api_keys_config.json")
-                if os.path.exists(cfg_path):
-                    with open(cfg_path, encoding="utf-8") as f:
-                        cfg = _json.load(f)
-                    cpa_key = cfg.get("cpa_key", "")
-                    if cfg.get("cpa_url"):
-                        cpa_base_url = cfg["cpa_url"].rstrip("/")
-            except Exception:
-                pass
-            if not cpa_key:
-                cpa_key = os.environ.get("CPA_API_KEY", "")
-            cpa_url = (
-                cpa_base_url
-                if cpa_base_url.endswith("/chat/completions")
-                else f"{cpa_base_url}/chat/completions"
-            )
+            request_config = llm_request_config(self.config, self.data_dir)
+            cpa_base_url = request_config["base_url"]
+            cpa_key = request_config["api_key"]
+            cpa_url = request_config["chat_url"]
 
             schedule_hint = f"\n今日日程参考：\n{schedule_text}" if schedule_text else ""
             llm_prompt = (
                 f"现在是 {now_str}。{schedule_hint}\n\n"
-                f"根据当前时间和日程，生成一个最适合这个时间点的活动描述（15-30字中文），"
-                f"要自然、有画面感、贴合时间。直接输出活动描述，不要解释。"
+                "请根据当前时间和日程生成两个字段，只输出 JSON：\n"
+                "{\n"
+                '  "activity_zh": "给 WebUI 展示的中文活动，15-30 个汉字，不要带时间",\n'
+                '  "image_prompt_en": "给 AI 生图用的英文场景描述，25-55 words, no Chinese, include pose/action/scene/props/lighting, do not include character appearance, quality prefix, or clothing",\n'
+                '  "outfit_en": "英文服装描述，8-20 words, must name visible clothing, shoes/accessories if visible, no Chinese"\n'
+                "}\n"
+                "activity_zh 必须中文；image_prompt_en 和 outfit_en 必须纯英文。不要解释。"
             )
 
             activity = ""
-
-            llm_config = self.config.get("llm", {})
-            primary_model = (llm_config.get("model") or "deepseek-v4-pro").strip()
-            fallback_model = (llm_config.get("fallback_model") or "deepseek-v4-flash").strip()
-            if primary_model == "gemini-3.5-flash":
-                primary_model = fallback_model or "deepseek-v4-pro"
-            llm_models = []
-            for model_name in (primary_model, fallback_model, "deepseek-v4-pro"):
-                if model_name and model_name not in llm_models:
-                    llm_models.append(model_name)
+            image_prompt = ""
+            outfit_prompt = ""
+            llm_models = request_config["models"] if cpa_url else []
 
             for model_name in llm_models:
                 try:
@@ -1251,45 +1449,71 @@ class GalleryServer:
                     }).encode()
                     req = urllib.request.Request(
                         cpa_url, data=body,
-                        headers={"Content-Type": "application/json", "Authorization": f"Bearer {cpa_key}"},
+                        headers={
+                            "Content-Type": "application/json",
+                            **({"Authorization": f"Bearer {cpa_key}"} if cpa_key else {}),
+                        },
                         method="POST",
                     )
                     with urllib.request.urlopen(req, timeout=15) as resp:
                         resp_data = _json.loads(resp.read())
                         msg = resp_data["choices"][0]["message"]
-                        activity = (msg.get("content") or msg.get("reasoning_content") or "").strip()
-                        activity = activity.strip('"').strip("'")
-                    if activity:
+                        raw_content = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+                        activity, image_prompt, outfit_prompt = self._parse_generate_now_llm(raw_content)
+                    if activity and image_prompt and outfit_prompt:
                         break
                 except Exception as e:
                     logger.warning(f"LLM activity generation failed with {model_name}: {e}")
 
-            if not activity:
-                activity = f"{now_str} 的日常时光"
-            activity = re.sub(r'\s+', ' ', activity).strip()
-            activity = re.sub(r'^\d{1,2}:\d{2}\s*', '', activity).strip()
+            if not activity or not image_prompt or not outfit_prompt:
+                fallback_activity, fallback_prompt, fallback_outfit = self._fallback_generate_now_context(now_str, schedule_text)
+                activity = activity or fallback_activity
+                image_prompt = image_prompt or fallback_prompt
+                outfit_prompt = outfit_prompt or fallback_outfit
             schedule_time = f"{now_str} {activity}".strip()
+            image_prompt = f"{image_prompt}. She is wearing {outfit_prompt}."
 
-            logger.info(f"LLM generated activity: {activity}")
+            logger.info(f"LLM generated activity: {activity}; image_prompt_en={image_prompt[:80]}")
 
             # 3) 调用 generate.py --theme custom --prompt <activity>，用 GPT Image 直连出图
-            generate_script = os.path.join(os.path.dirname(__file__), "zhuzhu", "generate.py")
+            generate_script = self._generate_script()
+            engine = self.config.get("image_gen", {}).get("default_engine", "gptimage") if gpt_key else "gitee"
+            child_env_extra = {}
+            if gpt_key:
+                child_env_extra["GPT_IMAGE_API_KEY"] = gpt_key
+            if gpt_base_url:
+                child_env_extra["GPT_IMAGE_BASE_URL"] = gpt_base_url
+            if cpa_key:
+                child_env_extra["CPA_API_KEY"] = cpa_key
+            if cpa_base_url:
+                child_env_extra["CPA_BASE_URL"] = cpa_base_url
+            child_env = self._child_env(child_env_extra)
             proc = await asyncio.create_subprocess_exec(
-                "python3", generate_script, "--theme", "custom", "--caption", "--source", "web",
-                "--prompt", activity, "--engine", "gptimage", "--schedule-time", schedule_time,
+                self._python_executable(), generate_script, "--theme", "custom", "--caption", "--source", "web",
+                "--prompt", image_prompt, "--engine", engine, "--schedule-time", schedule_time,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
-                cwd=os.path.join(os.path.dirname(__file__), "zhuzhu"),
+                cwd=os.path.dirname(generate_script),
+                env=child_env,
             )
             stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=900)
             
             if proc.returncode != 0:
                 logger.error(f"generate.py failed: {stderr.decode(errors='replace')[-500:]}")
-                return web.json_response({"error": "generate_failed", "detail": stderr.decode(errors='replace')[-300:]}, status=500)
+                detail = stderr.decode(errors='replace')[-500:]
+                if "GPT_IMAGE_API_KEY or gpt_key is required" in detail:
+                    return web.json_response({
+                        "error": "missing_image_key",
+                        "message": "请先在设置里配置 GPT Image Key 或 Gitee Key，再使用“现在在干嘛”。",
+                    }, status=400)
+                return web.json_response({
+                    "error": "generate_failed",
+                    "message": "生图失败，请检查 GPT Image/Gitee 配置或稍后重试。",
+                    "detail": detail[-300:],
+                }, status=500)
             
             stdout_text = stdout.decode(errors='replace')
             # Parse SUCCESS:<path> from output
-            import re
             m = re.search(r"SUCCESS:(.+)", stdout_text)
             if not m:
                 return web.json_response({"error": "no_output"}, status=500)
@@ -1400,13 +1624,19 @@ class GalleryServer:
             store = ScheduleStore(self.data_dir)
             result = {"new_fav": None}
             def _toggle(all_data):
-                entry = all_data.get(img_id)
-                if not entry:
+                key = img_id if img_id in all_data else ""
+                if not key:
+                    for item_key, candidate in all_data.items():
+                        if isinstance(candidate, dict) and candidate.get("image_filename") == img_id:
+                            key = item_key
+                            break
+                if not key:
                     return all_data
+                entry = all_data[key]
                 current_fav = entry.get("favorite", False)
                 new_fav = not current_fav
                 entry["favorite"] = new_fav
-                all_data[img_id] = entry
+                all_data[key] = entry
                 result["new_fav"] = new_fav
                 return all_data
             store.update(_toggle)
@@ -1465,6 +1695,15 @@ class GalleryServer:
                 return f.read().strip()
         return "unknown"
 
+    @staticmethod
+    def _version_key(version: str) -> tuple[int, ...]:
+        """Build a comparable key for simple semantic versions like 1.1.2."""
+        parts = []
+        for part in str(version or "").lstrip("v").split("."):
+            match = re.match(r"(\d+)", part)
+            parts.append(int(match.group(1)) if match else 0)
+        return tuple(parts or [0])
+
     async def handle_version(self, request: web.Request):
         """返回当前版本信息"""
         version = self._load_version()
@@ -1475,17 +1714,33 @@ class GalleryServer:
         import aiohttp
         import json
 
-        github_api = "https://api.github.com/repos/i-kirito/portrait-gallery/releases/latest"
+        github_api = self.config.get("update", {}).get("github_api", "")
         current_version = self._load_version()
+        if not github_api:
+            return web.json_response({
+                "status": "unavailable",
+                "message": "未配置更新检查地址",
+                "current": current_version,
+            })
+
+        github_proxy = self._github_proxy()
+        headers = {
+            "Accept": "application/vnd.github+json",
+            "User-Agent": "portrait-gallery-updater",
+        }
 
         try:
-            async with aiohttp.ClientSession(trust_env=True) as session:
-                async with session.get(github_api) as resp:
+            timeout = aiohttp.ClientTimeout(total=20)
+            async with aiohttp.ClientSession(trust_env=True, timeout=timeout, headers=headers) as session:
+                async with session.get(github_api, proxy=github_proxy or None) as resp:
                     if resp.status != 200:
                         error_text = await resp.text()
                         logger.error(f"GitHub API error: {resp.status}, {error_text}")
+                        error_message = f"GitHub API 请求失败: {resp.status}"
+                        if resp.status == 403 and not github_proxy:
+                            error_message += "（可在设置中填写 GitHub 代理后重试）"
                         return web.json_response(
-                            {"error": f"GitHub API 请求失败: {resp.status}"},
+                            {"error": error_message},
                             status=500
                         )
 
@@ -1497,7 +1752,7 @@ class GalleryServer:
                             status=500
                         )
 
-                    if latest_version == current_version:
+                    if self._version_key(latest_version) <= self._version_key(current_version):
                         return web.json_response({"message": "已是最新版本"})
 
                     # 返回更新信息
@@ -1521,12 +1776,19 @@ class GalleryServer:
 
         try:
             # 1. git pull（注入代理环境变量）
-            env = os.environ.copy()
-            env.setdefault("HTTP_PROXY", "http://192.168.31.213:7890")
-            env.setdefault("HTTPS_PROXY", "http://192.168.31.213:7890")
+            project_root = resolve_project_root(self.config_path, self.config)
+            if not (project_root / ".git").exists():
+                return web.json_response({
+                    "status": "unavailable",
+                    "message": "当前项目目录不是 Git 仓库，无法自动更新。请从发布包或仓库同步后重启服务。",
+                })
+            env = self._child_env(self._github_proxy_env())
+            update_config = self.config.get("update", {})
+            remote = update_config.get("remote", "origin")
+            branch = update_config.get("branch", "main")
             result = subprocess.run(
-                ["git", "pull", "origin", "main"],
-                cwd=os.path.dirname(os.path.dirname(__file__)),
+                ["git", "pull", remote, branch],
+                cwd=str(project_root),
                 capture_output=True,
                 text=True,
                 timeout=60,

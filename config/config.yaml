@@ -1,5 +1,20 @@
 config:
-  schedule_time: 07:00
+  schedule_time: '07:00'
+  timezone: Asia/Shanghai
+schedule:
+  required_periods:
+    - name: morning
+      label: 早
+      start: '06:00'
+      end: '11:59'
+    - name: noon
+      label: 中
+      start: '12:00'
+      end: '17:59'
+    - name: evening
+      label: 晚
+      start: '18:00'
+      end: '23:59'
 llm:
   model: mimo-v2.5
   fallback_model: mimo-v2.5-pro
@@ -7,6 +22,11 @@ image_gen:
   script_dir: /Users/lukai/portrait-gallery/app/zhuzhu
   default_engine: gptimage
   timeout: 300
+  gpt_model: gpt-image-2
+  gpt_base_url: https://jiuuij.de5.net/v1/chat/completions
+  gitee_model: z-image-turbo
+  gitee_url: https://ai.gitee.com/v1/images/generations
+  gemini_model: gemini-3.1-flash-image
 character:
   appearance: young adult Chinese girl, fair skin, delicate features. dusty rose pink
     hair, wispy air bangs. large round doll-like deep-set natural dark brown eyes.
@@ -20,4 +40,15 @@ gallery:
 webhook:
   enabled: true
   url: ''
-data_dir: /Users/lukai/portrait-gallery/data
+paths:
+  data_dir: /Users/lukai/portrait-gallery/data
+  reference_dir: /Users/lukai/portrait-gallery/data/references
+  builtin_reference_dir: /Users/lukai/portrait-gallery/app/references
+integrations:
+  send_enabled: true
+  hermes_cli: ''
+  wechat_target: weixin
+update:
+  github_api: https://api.github.com/repos/i-kirito/portrait-gallery/releases/latest
+  remote: origin
+  branch: main
