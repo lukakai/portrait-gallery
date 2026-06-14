@@ -11,7 +11,7 @@ from core import (
     REQUEST_SESSION,
     RETRYABLE_STATUS,
     RETRY_DELAY_SECONDS,
-    build_caption,
+    build_caption_for_image,
     build_prompt,
     sync_to_gallery,
     get_gitee_key,
@@ -62,7 +62,8 @@ def generate_image_bytes(prompt: str):
 
 
 def generate(theme: str, send: bool = False, caption: bool = False,
-             prompt_override: Optional[str] = None, prompt_is_final: bool = False):
+             prompt_override: Optional[str] = None, prompt_is_final: bool = False,
+             source: str = "chat", sync_gallery: bool = True, schedule_time: str = ""):
     prompt = prompt_override if prompt_is_final and prompt_override else build_prompt(theme, prompt_override)
     result = generate_image_bytes(prompt)
     if not result:
@@ -74,9 +75,22 @@ def generate(theme: str, send: bool = False, caption: bool = False,
 
     caption_text = None
     if caption:
-        caption_text = build_caption(theme)
+        caption_text = build_caption_for_image(theme, path, schedule_time=schedule_time)
     if send:
         send_photo(path, caption_text)
+
+    if sync_gallery:
+        sync_to_gallery(
+            path,
+            filename,
+            theme,
+            prompt=prompt,
+            caption=caption_text or "",
+            gen_time=gen_time,
+            model_name=MODEL_NAME,
+            source=source,
+            schedule_time=schedule_time,
+        )
 
     print(f"SUCCESS:{path}")
     if caption_text:
@@ -90,8 +104,11 @@ if __name__ == "__main__":
     parser.add_argument("--send", action="store_true")
     parser.add_argument("--caption", action="store_true")
     parser.add_argument("--prompt", type=str, default=None, help="自定义完整 prompt（自动注入前缀+外貌）")
+    parser.add_argument("--source", choices=["cron", "web", "chat", "custom"], default="chat", help="来源标识")
+    parser.add_argument("--schedule-time", type=str, default="", help="对应的日程时间和活动，如 '11:00 做奶茶'")
     args = parser.parse_args()
-    path = generate(args.theme, args.send, args.caption, args.prompt)
+    path = generate(args.theme, args.send, args.caption, args.prompt,
+                    source=args.source, schedule_time=args.schedule_time)
     if not path:
         print("ERROR: Gitee generation failed", file=sys.stderr)
         sys.exit(1)

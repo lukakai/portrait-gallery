@@ -6,7 +6,7 @@ import subprocess
 import sys
 from typing import Optional
 
-from settings import build_child_env, configured_python
+from settings import build_child_env, configured_python, image_process_timeout, resolve_image_dir
 
 logger = logging.getLogger(__name__)
 
@@ -29,29 +29,42 @@ class ImageGenerator:
         self.config_path = config_path
         self.python_executable = python_executable or configured_python(self.config) or sys.executable
         self.default_engine = default_engine or self.config.get("image_gen", {}).get("default_engine", "gptimage")
-        self.output_dir = os.path.join(data_dir, "images")
+        self.output_dir = resolve_image_dir(self.config, data_dir)
         os.makedirs(self.output_dir, exist_ok=True)
 
     @property
     def generate_script(self) -> str:
         return os.path.join(self.script_dir, "generate.py")
 
+    def set_output_dir(self, output_dir: str):
+        self.output_dir = os.path.abspath(os.path.expanduser(output_dir))
+        os.makedirs(self.output_dir, exist_ok=True)
+
     def build_env(self, extra: Optional[dict[str, str]] = None) -> dict[str, str]:
-        return build_child_env(self.config, self.config_path, self.data_dir, extra)
+        merged = {"ZHUZHU_MEDIA_DIR": self.output_dir}
+        if extra:
+            merged.update(extra)
+        return build_child_env(self.config, self.config_path, self.data_dir, merged)
 
     async def generate(
         self,
         prompt: str,
         style: Optional[str] = None,
         engine: str = "",
-        timeout: int = 300,
+        timeout: int = 0,
         ref_image: str = "",
         size: str = "",
         source: str = "custom",
+        prompt_final: bool = False,
+        theme: str = "custom",
+        schedule_time: str = "",
+        caption: bool = False,
     ) -> Optional[str]:
         """生成图片，返回图片文件名（相对路径）（异步，不阻塞事件循环）"""
         engine = engine or self.default_engine
-        logger.info(f"开始生图: engine={engine}, style={style}, prompt={prompt[:80]}...")
+        if not timeout:
+            timeout = image_process_timeout(self.config, with_reference_fallback=bool(style or ref_image))
+        logger.info(f"开始生图: theme={theme}, engine={engine}, style={style}, size={size or '-'}, prompt={prompt[:80]}...")
 
         generate_script = self.generate_script
         if not os.path.isfile(generate_script):
@@ -62,17 +75,24 @@ class ImageGenerator:
         cmd = [
             self.python_executable,
             generate_script,
-            "--theme", "custom",
+            "--theme", theme or "custom",
             "--engine", engine,
             "--source", source,
         ]
+        if caption:
+            cmd.append("--caption")
         if style:
             cmd.extend(["--style", style])
         if ref_image:
             cmd.extend(["--ref-image", ref_image])
         if size:
             cmd.extend(["--size", size])
-        cmd.extend(["--prompt", prompt])
+        if schedule_time:
+            cmd.extend(["--schedule-time", schedule_time])
+        if prompt_final:
+            cmd.append("--prompt-final")
+        if prompt:
+            cmd.extend(["--prompt", prompt])
 
         try:
             # 用 run_in_executor 避免阻塞事件循环
@@ -119,19 +139,9 @@ class ImageGenerator:
         self,
         outfit_prompt: str,
         outfit_style: str,
+        base_style: str = "",
     ) -> Optional[str]:
-        """根据穿搭描述生成图片，自动选择引擎和风格"""
-        style_map = {
-            "冷御风": "cool",
-            "甜美风": "sweet",
-            "元气风": "girly",
-            "温柔风": "sweet",
-            "优雅风": "cool",
-            "休闲风": "girly",
-            "酷飒风": "cool",
-            "清新风": "sweet",
-            "性感风": "cool",
-            "复古风": "cool",
-        }
-        style = style_map.get(outfit_style, None)
+        """根据穿搭描述生成图片，使用 LLM 选出的当天底模。"""
+        style_value = (base_style or "").strip().lower()
+        style = style_value if style_value in {"cool", "girly", "sweet"} else None
         return await self.generate(outfit_prompt, style=style)

@@ -14,7 +14,7 @@ import requests
 from core import (
     CONFIG_PATH,
     SECRETARY_SCHEDULE_PATH,
-    build_caption,
+    build_caption_for_image,
     build_prompt,
     enhance_prompt,
     get_cpa_chat_url,
@@ -28,6 +28,7 @@ from generate_gitee import MODEL_NAME as GITEE_MODEL_NAME
 from generate_gitee import generate as generate_with_gitee
 from generate_gptimage import GPTIMAGE_DIRECT_MODEL
 from generate_gptimage import generate as generate_with_gptimage
+from settings import outfit_style_to_prompt_hint, style_reference_filename
 
 # Gemini image generation always uses the CPA Base URL config.
 _GEMINI_CPA_MODEL = get_image_model("gemini_model", "gemini-3.1-flash-image")
@@ -36,27 +37,11 @@ DAILY_THEMES = {"morning", "noon", "evening", "bedtime"}
 ALL_THEMES = sorted(DAILY_THEMES | {"sexy", "custom"})
 
 STYLE_REF_MAP = {}
-for _style, _fname in [
-    ("cool", "reference_face.jpg"),
-    ("girly", "ref_style_girly.jpg"),
-    ("sweet", "ref_style_sweet.jpg"),
-]:
+for _style in ("cool", "girly", "sweet"):
+    _fname = style_reference_filename(_style)
     _path = get_reference_path(_fname)
     if _path:
         STYLE_REF_MAP[_style] = _path
-
-STYLE_EN_MAP = {
-    "冷御风": "cool elegant style",
-    "甜美风": "sweet style",
-    "元气风": "energetic girly style",
-    "温柔风": "gentle soft style",
-    "优雅风": "elegant style",
-    "休闲风": "casual style",
-    "酷飒风": "chic cool style",
-    "清新风": "fresh style",
-    "性感风": "glamorous style",
-    "复古风": "retro style",
-}
 
 
 def _extract_style_hint(outfit_info: str) -> str:
@@ -66,7 +51,55 @@ def _extract_style_hint(outfit_info: str) -> str:
     if not m:
         return ""
     raw_style = m.group(1).strip()
-    return STYLE_EN_MAP.get(raw_style, raw_style if not re.search(r'[\u4e00-\u9fff]', raw_style) else "")
+    return outfit_style_to_prompt_hint(raw_style)
+
+
+def _extract_outfit_style_name(outfit_info: str) -> str:
+    if not outfit_info:
+        return ""
+    m = re.search(r'风格[：:]\s*([^\s\n，,。；;]+)', outfit_info)
+    return m.group(1).strip() if m else ""
+
+
+def _get_today_outfit_style_name() -> str:
+    today_str = date.today().isoformat()
+    if not os.path.exists(_SCHEDULE_PATH):
+        return ""
+    try:
+        with open(_SCHEDULE_PATH, encoding="utf-8") as f:
+            data = json.load(f)
+    except (json.JSONDecodeError, OSError):
+        return ""
+
+    daily = data.get(today_str)
+    if isinstance(daily, dict):
+        style_name = (daily.get("outfit_style") or "").strip()
+        if style_name:
+            return style_name
+        style_name = _extract_outfit_style_name(daily.get("outfit", ""))
+        if style_name:
+            return style_name
+
+    for entry in data.values():
+        if not isinstance(entry, dict) or entry.get("date") != today_str:
+            continue
+        style_name = (entry.get("outfit_style") or "").strip()
+        if style_name:
+            return style_name
+        style_name = _extract_outfit_style_name(entry.get("outfit", ""))
+        if style_name:
+            return style_name
+    return ""
+
+
+def _gallery_outfit_style_for_source(source: str, actual_style: Optional[str]) -> str:
+    """Return the gallery style label without leaking the daily schedule style into chat/custom images."""
+    if (source or "").strip() in {"chat", "custom"}:
+        style = (actual_style or "").strip()
+        if style in {"cool", "girly", "sweet"}:
+            return "自定义"
+        return style
+    return _get_today_outfit_style_name()
 
 
 def _gitee_fallback_enabled() -> bool:
@@ -374,27 +407,8 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "") -> tuple
                     return ctx, f"{raw_slot} {display_best}".strip(), outfit_kw, scene_kw
     
     if not schedule:
-        # Fallback: no schedule found, generate context from current time + theme
-        from datetime import datetime
-        now = datetime.now()
-        # 优先用 schedule_time_override 的精确时间
-        if schedule_time_override:
-            time_str = schedule_time_override.strip()
-        else:
-            time_str = f"{now.hour:02d}:{now.minute:02d}"
-        
-        _FALLBACK_ACTIVITIES = {
-            "morning": ["晨间护肤routine", "喝咖啡看日出", "晨跑后拉伸放松", "做早餐中", "阳台看书晒太阳", "整理穿搭出门"],
-            "noon": ["午后小憩", "咖啡厅办公", "和闺蜜约饭", "逛街shopping", "公园散步拍照", "喝下午茶吃甜点"],
-            "evening": ["下班后放松时刻", "健身房运动", "弹琴唱歌", "做饭时间", "夜晚城市漫步", "居家追剧放松"],
-            "bedtime": ["睡前护肤敷面膜", "窝在被窝看小说", "泡澡放松", "床头灯下看书", "深夜emo时间", "和主人说晚安"],
-        }
-        import random as _rnd
-        activity = _rnd.choice(_FALLBACK_ACTIVITIES.get(theme, ["日常活动"]))
-        ctx = f"Today's plan: {activity}"
-        raw_slot = f"{time_str} {activity}"
-        print(f"📋 Schedule fallback: {ctx}", file=sys.stderr)
-        return ctx, raw_slot, "", ""
+        print("📋 No daily LLM schedule found; skipping schedule action injection", file=sys.stderr)
+        return "", "", "", ""
     
     # Time-based schedule format: "HH:MM activity" or "period：activity"
     # Try period-based matching first (上午/中午/下午/晚上/深夜)
@@ -492,9 +506,10 @@ def generate(
     ref_image: Optional[str] = None,
     size: Optional[str] = None,
     schedule_time: str = "",
+    prompt_final: bool = False,
 ):
     # If user didn't specify a hairstyle, let LLM pick one
-    if prompt_override and engine == "gptimage" and theme != "sexy":
+    if prompt_override and not prompt_final and engine == "gptimage" and theme != "sexy":
         hair_keywords = {"马尾", "辫", "丸子头", "双马尾", "编发", "披肩", "散发", "盘发",
                          "ponytail", "braid", "bun", "tails", "updo", "half-up"}
         if not any(kw in prompt_override.lower() for kw in hair_keywords):
@@ -503,26 +518,33 @@ def generate(
                 prompt_override = f"{llm_hair}, {prompt_override}"
                 print(f"💇 LLM chose hairstyle: {llm_hair}", file=sys.stderr)
 
-    resolved_prompt = resolve_prompt(theme, prompt_override, enhance)
+    if prompt_final and prompt_override:
+        resolved_prompt = prompt_override
+    else:
+        resolved_prompt = resolve_prompt(theme, prompt_override, enhance)
 
     # Inject daily schedule context for timed photos (not custom/sexy)
     schedule_ctx, schedule_raw, outfit_kw, scene_kw = _get_schedule_context(theme, schedule_time)
     schedule_activity = ""
-    if schedule_ctx and theme in DAILY_THEMES:
+    if schedule_ctx and theme in DAILY_THEMES and not prompt_final:
         # Extract activity text for schedule-aware prompt building
         import re
-        m = re.search(r"Today's plan:\s*(.+?)(?:\.|$)", schedule_ctx)
+        m = re.search(r"Today's plan:\s*(.+?)(?:\.\s*Style:|$)", schedule_ctx)
         if m:
             schedule_activity = m.group(1).strip()
         resolved_prompt = f"{resolved_prompt}. {schedule_ctx}"
         print(f"📋 Injected schedule into prompt (activity: {schedule_activity})", file=sys.stderr)
     
     # Re-build prompt with schedule-aware element selection if we have activity
-    if schedule_activity and theme in DAILY_THEMES:
+    if schedule_activity and theme in DAILY_THEMES and not prompt_final:
+        # `scene_kw` comes from the day's overall prompt, not the matched time slot.
+        # Keep outfit keywords, but let the matched LLM schedule line drive action/scene.
+        if scene_kw:
+            print(f"🏠 Keeping day-level scene keywords out of timed slot: {scene_kw[:60]}", file=sys.stderr)
         resolved_prompt = build_prompt(theme, schedule_activity=schedule_activity,
-                                       outfit_keywords=outfit_kw, scene_keywords=scene_kw)
+                                       outfit_keywords=outfit_kw, scene_keywords="")
         resolved_prompt = f"{resolved_prompt}. {schedule_ctx}"
-        print(f"🎨 Rebuilt prompt with schedule-matched elements (outfit_kw={outfit_kw[:40]}, scene_kw={scene_kw[:40]})", file=sys.stderr)
+        print(f"🎨 Rebuilt prompt from LLM schedule line (outfit_kw={outfit_kw[:40]})", file=sys.stderr)
 
     # Resolve style to ref_image path (only supported by gptimage engine)
     requested_ref_image = ref_image
@@ -542,7 +564,7 @@ def generate(
         # 先检查当天是否已有风格，保持一天一致
         today_str = date.today().isoformat()
         today_style = ""
-        if os.path.exists(_SCHEDULE_PATH):
+        if source not in {"chat", "custom"} and os.path.exists(_SCHEDULE_PATH):
             try:
                 with open(_SCHEDULE_PATH, encoding="utf-8") as f:
                     sched_data = json.load(f)
@@ -573,17 +595,47 @@ def generate(
 
     used_model = ""
     if theme == "sexy":
-        path = generate_with_gitee(theme, send=False, caption=caption, prompt_override=resolved_prompt, prompt_is_final=True)
+        path = generate_with_gitee(
+            theme,
+            send=False,
+            caption=caption,
+            prompt_override=resolved_prompt,
+            prompt_is_final=True,
+            source=source,
+            sync_gallery=False,
+            schedule_time=schedule_raw,
+        )
         if path:
             used_model = GITEE_MODEL_NAME
     elif engine == "gptimage":
-        path = generate_with_gptimage(theme, send=False, caption=caption, prompt_override=resolved_prompt, ref_image=ref_image, size=size, style=actual_style, prompt_is_final=True)
+        path = generate_with_gptimage(
+            theme,
+            send=False,
+            caption=caption,
+            prompt_override=resolved_prompt,
+            ref_image=ref_image,
+            size=size,
+            style=actual_style,
+            prompt_is_final=True,
+            source=source,
+            sync_gallery=False,
+            schedule_time=schedule_raw,
+        )
         if path:
             used_model = GPTIMAGE_DIRECT_MODEL
         if not path:
             if _gitee_fallback_enabled():
                 print("GPT Image failed, falling back to Gitee", file=sys.stderr)
-                path = generate_with_gitee(theme, send=False, caption=caption, prompt_override=resolved_prompt, prompt_is_final=True)
+                path = generate_with_gitee(
+                    theme,
+                    send=False,
+                    caption=caption,
+                    prompt_override=resolved_prompt,
+                    prompt_is_final=True,
+                    source=source,
+                    sync_gallery=False,
+                    schedule_time=schedule_raw,
+                )
                 if path:
                     used_model = GITEE_MODEL_NAME
             else:
@@ -595,24 +647,54 @@ def generate(
         if not path:
             if _gitee_fallback_enabled():
                 print("Gemini CPA failed, falling back to Gitee", file=sys.stderr)
-                path = generate_with_gitee(theme, send=False, caption=caption, prompt_override=resolved_prompt, prompt_is_final=True)
+                path = generate_with_gitee(
+                    theme,
+                    send=False,
+                    caption=caption,
+                    prompt_override=resolved_prompt,
+                    prompt_is_final=True,
+                    source=source,
+                    sync_gallery=False,
+                    schedule_time=schedule_raw,
+                )
                 if path:
                     used_model = GITEE_MODEL_NAME
             else:
                 print("Gemini CPA failed; Gitee fallback is disabled", file=sys.stderr)
     else:  # engine == "gitee"
-        path = generate_with_gitee(theme, send=False, caption=caption, prompt_override=resolved_prompt, prompt_is_final=True)
+        path = generate_with_gitee(
+            theme,
+            send=False,
+            caption=caption,
+            prompt_override=resolved_prompt,
+            prompt_is_final=True,
+            source=source,
+            sync_gallery=False,
+            schedule_time=schedule_raw,
+        )
         if path:
             used_model = GITEE_MODEL_NAME
         if not path:
             print("Gitee failed, falling back to GPT Image", file=sys.stderr)
-            path = generate_with_gptimage(theme, send=False, caption=caption, prompt_override=resolved_prompt, ref_image=ref_image, size=size, style=actual_style, prompt_is_final=True)
+            path = generate_with_gptimage(
+                theme,
+                send=False,
+                caption=caption,
+                prompt_override=resolved_prompt,
+                ref_image=ref_image,
+                size=size,
+                style=actual_style,
+                prompt_is_final=True,
+                source=source,
+                sync_gallery=False,
+                schedule_time=schedule_raw,
+            )
             if path:
                 used_model = GPTIMAGE_DIRECT_MODEL
 
     caption_text = None
     if path and caption:
-        caption_text = build_caption(theme)
+        caption_text = build_caption_for_image(theme, path, schedule_time=schedule_raw)
         if caption_text and send:
             send_photo(path, caption_text)
             print(f"CAPTION:{caption_text}")
@@ -625,7 +707,8 @@ def generate(
                         caption=caption_text or "",
                         model_name=used_model,
                         source=source,
-                        schedule_time=schedule_raw)
+                        schedule_time=schedule_raw,
+                        outfit_style=_gallery_outfit_style_for_source(source, actual_style))
 
     return path
 
@@ -639,10 +722,11 @@ if __name__ == "__main__":
     parser.add_argument("--prompt", type=str, default=None, help="自定义描述（自动注入前缀+外貌）")
     parser.add_argument("--enhance", action="store_true", help="用 LLM 扩写描述后再自动注入")
     parser.add_argument("--style", choices=["cool", "girly", "sweet"], default=None, help="风格底模: cool(冷御风)/girly(少女风)/sweet(甜妹风), 仅 gptimage 引擎支持")
-    parser.add_argument("--source", choices=["cron", "web", "chat"], default="chat", help="来源标识: cron(定时)/web(现在在干嘛)/chat(聊天生图)")
+    parser.add_argument("--source", choices=["cron", "web", "chat", "custom"], default="chat", help="来源标识: cron(定时)/web(现在在干嘛)/chat(聊天生图)/custom(自定义)")
     parser.add_argument("--ref-image", type=str, default=None, help="参考图本地路径（图生图/img2img 模式）")
     parser.add_argument("--size", type=str, default=None, help="图片尺寸")
     parser.add_argument("--schedule-time", type=str, default="", help="定时任务对应的日程时间和活动，如 '20:30 晚间直播'")
+    parser.add_argument("--prompt-final", action="store_true", help="prompt 已是完整生图提示词，不再注入画质/人设/发型")
     args = parser.parse_args()
 
     effective_theme = args.theme or ("custom" if args.prompt else "morning")
@@ -659,6 +743,7 @@ if __name__ == "__main__":
         ref_image=args.ref_image,
         size=args.size,
         schedule_time=args.schedule_time,
+        prompt_final=args.prompt_final,
     )
     if not path:
         print("ERROR: generation failed", file=sys.stderr)

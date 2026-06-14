@@ -1,29 +1,49 @@
 config:
-  schedule_time: '07:00'
+  schedule_time: 07:00
   timezone: Asia/Shanghai
 schedule:
   required_periods:
-    - name: morning
-      label: 早
-      start: '06:00'
-      end: '11:59'
-    - name: noon
-      label: 中
-      start: '12:00'
-      end: '17:59'
-    - name: evening
-      label: 晚
-      start: '18:00'
-      end: '23:59'
+  - name: morning
+    label: 早
+    start: 06:00
+    end: '11:59'
+  - name: noon
+    label: 中
+    start: '12:00'
+    end: '17:59'
+  - name: evening
+    label: 晚
+    start: '18:00'
+    end: '23:59'
 llm:
   model: mimo-v2.5
   fallback_model: mimo-v2.5-pro
+  enhance_max_tokens: 400
+  enhance_temperature: 0.85
+  enhance_timeout: 25
+  caption_max_tokens: 90
+  caption_temperature: 0.9
+  caption_timeout: 30
 image_gen:
   script_dir: /Users/lukai/portrait-gallery/app/zhuzhu
   default_engine: gptimage
   timeout: 300
+  max_retries: 3
+  retry_delay_seconds: 3
+  retryable_status:
+  - 429
+  - 500
+  - 502
+  - 503
+  - 504
+  text2img_timeout: 180
+  img2img_timeout: 300
+  img2img_max_size: 512
+  img2img_quality: 75
+  metadata_category: portrait
+  metadata_size: 1536x2048
   gpt_model: gpt-image-2
-  gpt_base_url: https://jiuuij.de5.net/v1/chat/completions
+  gpt_base_url: https://your-gpt-image-endpoint/v1/chat/completions
   gitee_model: z-image-turbo
   gitee_url: https://ai.gitee.com/v1/images/generations
   gemini_model: gemini-3.1-flash-image
@@ -46,6 +66,7 @@ paths:
   builtin_reference_dir: /Users/lukai/portrait-gallery/app/references
 integrations:
   send_enabled: true
+  push_channel: wechat
   hermes_cli: ''
   wechat_target: weixin
 update:

@@ -1,6 +1,6 @@
 # 🎀 Portrait Gallery
 
-当前版本：**v1.1.2**
+当前版本：**v1.1.6**
 
 > AI 穿搭生图 & 个人画廊系统 —— 让 AI 每天为你量身定制穿搭方案并自动生成写真
 
@@ -9,7 +9,7 @@
 ## ✨ 功能亮点
 
 - 📅 **LLM 日程驱动** — DeepSeek 自动生成每日穿搭日程（HH:mm 精度），按时触发生图
-- 🎨 **双引擎生图** — GPT Image 高质量 + Gitee z-image-turbo 可选回退
+- 🎨 **多引擎生图** — 支持 OpenAI-compatible API (GPT Image / AxonHub / 自定义端点)、Gemini、Gitee z-image-turbo 可选回退（默认关闭）
 - 🖼️ **Web 画廊** — 今日/全部/收藏三 Tab，横版大卡 + 网格双布局
 - 🎀 **穿搭生成** — 自定义 prompt + 参考图 + 尺寸选择
 - ⏰ **动态调度** — LLM 日程驱动，根据 HH:mm 时间动态创建一次性生图任务
@@ -36,7 +36,7 @@ python3 -m pip install -r app/requirements.txt
 
 ```yaml
 llm:
-  base_url: "http://127.0.0.1:8327/v1"   # CPA 代理地址（用于 LLM）
+  base_url: "http://your-cpa-proxy:port/v1"   # CPA 代理地址（用于 LLM）
   api_key: "your-api-key"
   model: "deepseek-v4-flash"
 
@@ -154,6 +154,21 @@ portrait-gallery/
 
 默认优先使用 GPT Image，并按重试机制处理失败；只有在设置里开启 Gitee 回退时，GPT Image 多次失败后才会改用 Gitee。
 
+### AxonHub 适配推荐
+
+推荐通过 [AxonHub](https://github.com/looplj/AxonHub) 统一管理多个生图渠道：
+
+1. 部署 AxonHub 并配置多个图像生成 channel（GPT Image / Gemini / 自定义）
+2. 在画廊的 Web 设置面板填入：
+   - **GPT Image Base URL**: `http://your-axonhub-host:port/v1`
+   - **GPT Image API Key**: AxonHub 的 API key（`ah-xxxxx` 格式）
+3. AxonHub 会自动按优先级 + 负载均衡路由请求
+
+**优势**：
+- 多渠道自动降级（一个挂了自动换下一个）
+- 统一鉴权和请求日志
+- 按模型名路由（`gpt-image-2` / `gemini-3.1-flash-image`）
+
 ## ⏰ 调度说明
 
 **日程驱动动态调度**：
@@ -257,6 +272,42 @@ curl "http://localhost:18889/api/gallery?key=$GALLERY_API_KEY"
 - **⚙️ 设置** — Web UI 管理 API 密钥
 
 ## 🧾 Release Notes
+
+### v1.1.6
+
+- 新增“收藏穿搭方案”，后续日程生成会把用户收藏的发型、服饰气质、配色、版型和材质作为软偏好参考。
+- 定时生图改为更尊重 LLM 日程里的动作、场景、道具和时间氛围，减少代码模板覆盖今日计划的问题。
+- 画廊卡片补充图片尺寸、文件大小和生成耗时等 metadata，网格按钮和列数控制在窄屏下更稳定。
+- 优化定时照片重抽：按原日程重新生成时保留新图自己的 caption，不再被旧图文案覆盖。
+- 修复手动补拍/重试绕过每日生图计划上限的问题，并恢复“现在在干嘛”对 `reasoning_content` LLM 响应的兼容。
+
+### v1.1.5
+
+- 生图子进程超时改为按 `process_timeout` 或重试、文生图/图生图、caption 等配置动态计算，长耗时图生图不再被固定 900 秒提前截断。
+- 定时生图和“现在在干嘛”会把具体日程传给 caption 生成，文案更贴合当前时间、地点和活动，避免和日程冲突。
+- GPT Image 图生图失败时自动回退到纯文生图，并在画廊数据和图片 metadata 中记录请求模式、实际模式、参考图和 fallback 状态。
+- 今日自动生图底模会优先复用当天日程或已完成 cron 图片的 `base_style`，让同一天的自动照片风格更稳定。
+- 画廊同步新增参考图 URL 映射，内置参考图和本地上传参考图会写入可展示的相对路径。
+
+### v1.1.4
+
+- 自定义穿搭生成新增比例、清晰度和自拍/半身/全身视角选择，并按目标尺寸保存输出图。
+- 新增画廊图片重抽入口，可基于已有最终 prompt 重新生成一张新图并保留原卡片上下文。
+- 日程生成新增 `base_style` 底模选择，让 LLM 在 cool / girly / sweet 中为当天风格选择参考底模。
+- 日程彩蛋的生图上限改为按已完成、待执行、运行中和失败待重试的计划槽位统一统计，避免重复补拍。
+- 推送渠道支持在 Web 设置中选择微信或 TG，并按人设来源自动优先使用 Hermes / OpenClaw。
+- 新增 Hermes 纯净文生图/图生图 API，图生图只允许使用受控参考图目录，避免任意本地路径被读取。
+- GPT Image 兼容 `/chat/completions` 和显式 `/images/generations` / `/images/edits`，保留裸 `/v1` 自动拼接 chat endpoint 的旧行为。
+- 优化 caption 防人设泄露、旅行/机场/机舱场景 prompt、移动端弹窗和设置面板交互。
+
+### v1.1.3
+
+- 新增人设来源设置，支持从 Hermes、OpenClaw 或自定义文本读取角色人设，并让小心思、日程文案和生图外貌提示词使用同一套运行时人设。
+- 收敛穿搭风格映射与参考图底模映射，风格池可在彩蛋弹窗内直接调整，避免计划风格和实际生成风格显示错位。
+- GPT Image Base URL、CPA Base URL、GitHub API 代理等设置支持本地持久化并在 Web 设置面板展示当前来源状态。
+- 新增图片存放位置设置和旧图清理功能，可按 3 天、7 天、1 个月、3 个月或自定义天数清理非收藏图片。
+- 优化画廊和今日卡片布局、设置面板排版、Gitee 回退开关开启态对比，以及 TG/聊天生图在全部列表中的展示回填。
+- 生图链路参数和 LLM 参数进一步配置化，更新流程保留本地 API Key、appearance、画廊图片和参考图。
 
 ### v1.1.2
 
