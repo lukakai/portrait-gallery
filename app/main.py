@@ -133,7 +133,9 @@ class PortraitGalleryApp:
         self.config = load_config(config_path)
         self.config_path = config_path
         self.data_dir = resolve_data_dir(self.config, config_path)
-        apply_network_env(self.config, data_dir=self.data_dir)
+        # 注：不调用 apply_network_env，避免把 API 域名加到 NO_PROXY
+        # macOS StashTunnel 下 DNS 解析依赖代理，加了 NO_PROXY 会导致 DNS 失败
+        # build_child_env 会在子进程层面处理网络配置
         os.makedirs(self.data_dir, exist_ok=True)
 
         # 初始化组件

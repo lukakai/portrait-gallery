@@ -1630,7 +1630,7 @@ class GalleryServer:
             if not base_url.endswith("/v1"):
                 base_url = f"{base_url}/v1"
 
-            headers = {}
+            headers = {"User-Agent": "PortraitGallery/1.0"}
             if cpa_key:
                 headers["Authorization"] = f"Bearer {cpa_key}"
 
@@ -2282,7 +2282,8 @@ class GalleryServer:
                         cpa_url, data=body,
                         headers={
                             "Content-Type": "application/json",
-                            **({"Authorization": f"Bearer {cpa_key}"} if cpa_key else {}),
+                            "User-Agent": "PortraitGallery/1.0",
+                            **( {"Authorization": f"Bearer {cpa_key}"} if cpa_key else {}),
                         },
                         method="POST",
                     )

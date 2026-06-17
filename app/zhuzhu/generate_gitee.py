@@ -34,7 +34,7 @@ def generate_image_bytes(prompt: str):
     if not api_key:
         print("Gitee API key is required", file=sys.stderr)
         return None
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    headers = {"Content-Type": "application/json", "User-Agent": "PortraitGallery/1.0", "Authorization": f"Bearer {api_key}"}
     payload = {
         "model": MODEL_NAME,
         "prompt": prompt,

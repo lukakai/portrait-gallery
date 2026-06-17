@@ -46,7 +46,8 @@ from settings import (
 requests.packages.urllib3.disable_warnings()
 
 REQUEST_SESSION = requests.Session()
-REQUEST_SESSION.proxies = {'http': None, 'https': None}  # 不走系统代理
+# 让 requests 使用系统代理环境变量用于 DNS 解析
+# freeapi.dgbmc.top 必须走代理（HTTP/2）才能连
 
 _GALLERY_CONFIG_PATH = resolve_config_path()
 try:
@@ -615,6 +616,7 @@ def _scene_caption_fallback(theme: str, persona: dict, caption: str = "", schedu
     if (
         caption
         and not _caption_has_persona_leak(caption)
+        and not _caption_has_prompt_leak(caption)
         and not _caption_conflicts_with_schedule(caption, schedule_time)
         and not _caption_is_gallery_record(caption)
         and not _caption_repeats_schedule(caption, schedule_time)
@@ -633,6 +635,18 @@ def _caption_has_persona_leak(caption: str) -> bool:
         "恋爱脑", "系统提示", "提示词", "SOUL", "Soul", "工程师",
     )
     return any(marker in text for marker in leak_markers)
+
+
+def _caption_has_prompt_leak(caption: str) -> bool:
+    """Detect if LLM returned the prompt instruction instead of a caption."""
+    text = str(caption or "")
+    # Prompt instruction markers — these should never appear in a real caption
+    prompt_markers = (
+        "用户现在需要", "任务", "首先看图片", "写一段配文",
+        "需要给这张自拍", "需要写雪枫的自拍", "任务是写一段",
+        "要撒娇俏皮的口吻", "要符合", "口吻写一段",
+    )
+    return any(marker in text for marker in prompt_markers)
 
 
 def _caption_is_generic_template(caption: str) -> bool:
@@ -788,7 +802,7 @@ def save_image(img_data: bytes, theme: str, model_name: str, style: Optional[str
     ts = int(time.time())
     ext = detect_extension(img_data)
     style_part = f"_{style}" if style else ""
-    filename = f"zhuzhu_{theme}{style_part}_{ts}.{ext}"
+    filename = f"xuefeng_{theme}{style_part}_{ts}.{ext}"
     path = os.path.join(WORKSPACE_MEDIA, filename)
 
     with open(path, "wb") as f:
@@ -834,7 +848,7 @@ def _translate_outfit(prompt: str, style_name: str) -> str:
     # First try to extract the clothing line directly from the prompt
     outfit_line = ""
     import re
-    m = re.search(r'She is wearing (.+?)\.\s', prompt)
+    m = re.search(r'She is wearing (.+?)(?:\.(?:\s|$))', prompt)
     if m:
         outfit_line = m.group(1).strip()
 
@@ -897,6 +911,21 @@ def _translate_outfit(prompt: str, style_name: str) -> str:
             (["boots"], "靴子"),
             (["ribbon"], "蝴蝶结"),
             (["earrings"], "耳饰"),
+            (["crop", "top"], "短款上衣"),
+            (["fitted", "crop", "top"], "修身短款上衣"),
+            (["high-waisted", "wide-leg", "trousers"], "高腰阔腿裤"),
+            (["wide-leg", "trousers"], "阔腿裤"),
+            (["shoulder", "bag"], "斜挎包"),
+            (["cardigan"], "开衫"),
+            (["lace", "cardigan"], "蕾丝外搭"),
+            (["sheer", "lace", "cardigan"], "薄纱蕾丝外搭"),
+            (["necklace"], "项链"),
+            (["low", "heels"], "低跟鞋"),
+            (["mary jane", "shoes"], "玛丽珍鞋"),
+            (["camisole", "top"], "吊带背心"),
+            (["lace", "trim"], "蕾丝花边"),
+            (["satin", "slip", "dress"], "缎面吊带连衣裙"),
+            (["slip", "dress"], "吊带连衣裙"),
         ]
         for needles, label in phrase_map:
             if (
@@ -938,7 +967,7 @@ def _translate_outfit(prompt: str, style_name: str) -> str:
         api_key = get_cpa_key()
         if not api_key:
             return _fallback_from_prompt()
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+        headers = {"Content-Type": "application/json", "User-Agent": "PortraitGallery/1.0", "Authorization": f"Bearer {api_key}"}
         sys_prompt = (
             "你是一个穿搭关键词提取器。从英文AI生图prompt中提取服装，用中文列出3-5个关键词，用顿号分隔。\n"
             "规则：\n"
@@ -1162,7 +1191,7 @@ def enhance_prompt(user_input: str, theme: Optional[str] = None) -> str:
     models = get_llm_models()
     if not api_key or not models or not get_cpa_chat_url():
         return user_input
-    headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+    headers = {"Content-Type": "application/json", "User-Agent": "PortraitGallery/1.0", "Authorization": f"Bearer {api_key}"}
     for model in models:
         payload = {
             "model": model,
@@ -1249,14 +1278,14 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
         chat_url = get_cpa_chat_url()
         if not api_key or not models or not chat_url:
             return _personalized_caption_fallback(theme, persona, schedule_time)
-        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {api_key}"}
+        headers = {"Content-Type": "application/json", "User-Agent": "PortraitGallery/1.0", "Authorization": f"Bearer {api_key}"}
         payload = {
             "model": models[0],
             "messages": [
                 {"role": "system", "content": system_msg},
                 {"role": "user", "content": user_content},
             ],
-            "max_tokens": min(config_int(_GALLERY_CONFIG, "llm.caption_max_tokens", 90, 1), 120),
+            "max_tokens": min(config_int(_GALLERY_CONFIG, "llm.caption_max_tokens", 300, 1), 500),
             "temperature": config_float(_GALLERY_CONFIG, "llm.caption_temperature", 0.9, 0),
         }
         resp = REQUEST_SESSION.post(
@@ -1266,7 +1295,9 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
             timeout=config_int(_GALLERY_CONFIG, "llm.caption_timeout", 30, 1),
         )
         if resp.status_code == 200:
-            caption = resp.json()["choices"][0]["message"]["content"].strip()
+            msg = resp.json()["choices"][0]["message"]
+            raw = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+            caption = raw
             if caption:
                 return _scene_caption_fallback(theme, persona, caption, schedule_time)
     except Exception as e:

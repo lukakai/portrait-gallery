@@ -920,13 +920,9 @@ def build_child_env(config: dict, config_path: str, data_dir: str, extra: dict[s
     root = resolve_project_root(config_path, config)
     image_dir = resolve_image_dir(config, data_dir)
     env = dict(os.environ)
-    # 强制不走系统代理（macOS 系统级 HTTP/SOCKS 代理会干扰 GPT Image API）
-    env["HTTP_PROXY"] = ""
-    env["HTTPS_PROXY"] = ""
-    env["http_proxy"] = ""
-    env["https_proxy"] = ""
-    env["NO_PROXY"] = "*"
-    env["no_proxy"] = "*"
+    # macOS StashTunnel 下 DNS 解析依赖系统代理
+    # 保留代理变量让 requests/curl 能通过代理发请求
+    # 已安装 h2 包支持 HTTP/2，走代理传大 payload 不丢包
     env["HERMES_PORTRAIT_GALLERY_HOME"] = str(root)
     env["CONFIG_PATH"] = str(Path(config_path).expanduser().resolve())
     env["GALLERY_DATA_DIR"] = data_dir

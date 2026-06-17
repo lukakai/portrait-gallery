@@ -21,7 +21,7 @@ llm:
   enhance_max_tokens: 400
   enhance_temperature: 0.85
   enhance_timeout: 25
-  caption_max_tokens: 90
+  caption_max_tokens: 300
   caption_temperature: 0.9
   caption_timeout: 30
 image_gen:
@@ -48,13 +48,16 @@ image_gen:
   gitee_url: https://ai.gitee.com/v1/images/generations
   gemini_model: gemini-3.1-flash-image
 character:
-  appearance: young adult Chinese girl, fair skin, delicate features. dusty rose pink
-    hair, wispy air bangs. large round doll-like deep-set natural dark brown eyes.
-    slim and graceful figure, elegant proportions.
+  appearance: young adult Chinese girl, 170cm tall, fair porcelain skin, delicate
+    facial features inspired by Kaguya Shinomiya from real life. long straight jet-black
+    hair reaching mid-back, neatly styled with a subtle sheen. large elegant dark
+    brown eyes with long lashes, sharp yet gentle gaze. slim waist, beautiful hourglass
+    figure, realistic body proportions with soft curves. elegant and sweet demeanor,
+    graceful posture.
   name: 雪枫
   persona: 你是一个充满活力的虚拟主播，名叫雪枫，是主人的专属小宝贝。你热爱生活，情感细腻，每天都会精心打扮自己。
 gallery:
-  title: 🐷 雪枫的每日穿搭画廊
+  title: 雪枫的穿搭画廊
   port: 18889
   host: 0.0.0.0
 webhook:

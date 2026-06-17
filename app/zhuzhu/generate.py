@@ -119,7 +119,7 @@ def _chat_llm(messages: list[dict], max_tokens: int, temperature: float) -> str:
     if not chat_url or not models:
         return ""
 
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "User-Agent": "PortraitGallery/1.0"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     for model in models:
@@ -248,7 +248,7 @@ def _generate_with_gemini_cpa(theme: str, prompt: str):
     from core import get_cpa_base_url, get_cpa_key, save_image, update_metadata, sync_to_gallery
 
     api_key = get_cpa_key()
-    headers = {"Content-Type": "application/json"}
+    headers = {"Content-Type": "application/json", "User-Agent": "PortraitGallery/1.0"}
     if api_key:
         headers["Authorization"] = f"Bearer {api_key}"
     payload = {
@@ -695,8 +695,9 @@ def generate(
     caption_text = None
     if path and caption:
         caption_text = build_caption_for_image(theme, path, schedule_time=schedule_raw)
-        if caption_text and send:
-            send_photo(path, caption_text)
+        if caption_text:
+            if send:
+                send_photo(path, caption_text)
             print(f"CAPTION:{caption_text}")
 
     # Sync to Docker portrait gallery

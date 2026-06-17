@@ -176,7 +176,7 @@ def _generate_via_images_api(prompt: str, ref_image: Optional[str], size: Option
 
     endpoint = f"{images_base}/images/edits" if ref_image else f"{images_base}/images/generations"
     endpoint_label = _gpt_endpoint_label(endpoint)
-    headers = {"Authorization": f"Bearer {api_key}"}
+    headers = {"Authorization": f"Bearer {api_key}", "User-Agent": "PortraitGallery/1.0"}
     timeout = IMG2IMG_TIMEOUT if ref_image else TEXT2IMG_TIMEOUT
     start = time.time()
 

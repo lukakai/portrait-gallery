@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>🐷 雪枫的每日穿搭画廊</title>
-<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🐷</text></svg>">
+<title>雪枫的每日穿搭画廊</title>
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>🌸</text></svg>">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=M+PLUS+Rounded+1c:wght@400;500;700;800&amp;family=Noto+Sans+SC:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
@@ -2585,7 +2585,7 @@ textarea:focus-visible,
 <div class="egg-overlay" id="eggOverlay">
   <div class="egg-card">
     <div class="egg-header">
-      <h2>🐷 今日日程彩蛋</h2>
+      <h2>🌸 今日日程彩蛋</h2>
       <div class="egg-date-row">
         <div class="egg-date" id="eggDate"></div>
         <button class="egg-refresh-btn" title="重新生成日程">
@@ -2665,7 +2665,7 @@ textarea:focus-visible,
 
 <div class="header">
   <div class="header-left">
-    <h1 style="user-select:none;"><span class="app-logo" id="appHeaderLogo" aria-hidden="true">🐷</span><span id="appHeaderTitle">每日穿搭画廊</span> <span class="version-tag" id="versionTag">v1.1.6</span></h1>
+    <h1 style="user-select:none;"><span class="app-logo" id="appHeaderLogo" aria-hidden="true">🌸</span><span id="appHeaderTitle">雪枫的穿搭画廊</span> <span class="version-tag" id="versionTag">v1.1.6</span></h1>
   </div>
   <div class="tabs">
     <button class="tab" data-tab="gallery" onclick="switchTab('gallery')"><span class="tab-label">✨ 全部</span><span class="tab-badge" id="badge-all">0</span></button>
@@ -2683,7 +2683,7 @@ textarea:focus-visible,
   <!-- Today Card -->
   <div class="today-section" id="todaySection">
     <div class="today-hero-title">
-      <h2><span class="pig-emoji">🐷</span> <span id="appHeroTitle">每日穿搭画廊</span></h2>
+      <h2><span class="pig-emoji">🌸</span> <span id="appHeroTitle">雪枫的穿搭画廊</span></h2>
       <div class="subtitle" id="appHeroSubtitle">每一天，都是不一样的雪枫 <span class="heart">💞</span></div>
       <button class="gen-today-btn" onclick="triggerGenerate()">💭 现在在干嘛</button>
     </div>
@@ -2995,7 +2995,7 @@ function compactDisplayText(value) {
 }
 
 function cleanGalleryTitle(value) {
-  return compactDisplayText(value).replace(/^🖼️?\s*/, "");
+  return compactDisplayText(value).replace(/^[🐷🖼️]\s*/, "");
 }
 
 function resolvedCharacterName(data) {

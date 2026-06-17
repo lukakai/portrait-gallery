@@ -75,7 +75,7 @@ class DailyScheduler:
             logger.error("LLM config missing: chat_url/models")
             return None
 
-        headers = {"Content-Type": "application/json"}
+        headers = {"Content-Type": "application/json", "User-Agent": "PortraitGallery/1.0"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
 
