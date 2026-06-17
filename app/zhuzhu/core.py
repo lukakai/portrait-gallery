@@ -29,6 +29,7 @@ from settings import (
     config_float,
     config_int,
     get_nested,
+    image_request_timeout,
     llm_request_config,
     load_config,
     load_json_file,
@@ -190,6 +191,10 @@ def get_image_model(key: str, default: str = "") -> str:
 
 def get_image_int(key: str, default: int, min_value: Optional[int] = None, max_value: Optional[int] = None) -> int:
     return config_int(_GALLERY_CONFIG, f"image_gen.{key}", default, min_value, max_value)
+
+
+def get_image_request_timeout(mode: str) -> int:
+    return image_request_timeout(_GALLERY_CONFIG, mode)
 
 
 CPA_BASE_URL = get_cpa_base_url()
@@ -594,22 +599,27 @@ def _personalized_caption_fallback(theme: str, persona: dict, schedule_time: str
 
 
 def _caption_voice_hint(persona: dict) -> str:
-    """Use persona tone as a tiny style hint without leaking the full Soul text."""
+    """Use persona tone as a style hint. Keep enough text to truly guide the voice,
+    but strip only真·安全敏感词（防止系统提示/越狱注入泄露），放行语气/性格描述词。"""
     voice = str(persona.get("caption_voice") or "").strip()
     if not voice:
         return "自然、亲切、贴近日常"
     voice = re.sub(r"\s+", " ", voice)
-    pieces = re.split(r"[。！？!?；;\n]", voice)
-    hint = next((piece.strip(" ，,、") for piece in pieces if piece.strip(" ，,、")), "")
-    if not hint:
-        return "自然、亲切、贴近日常"
-    blocked = (
-        "人设", "身份", "设定", "体质", "人格", "痴迷", "占有欲",
-        "恋爱脑", "系统", "提示词", "SOUL", "Soul", "工程师",
+    # 只过滤可能泄露系统/注入的真·危险标记，语气性格词（撒娇/黏人/占有欲等）保留作风格引导
+    safety_blocked = (
+        "系统提示", "提示词", "system prompt", "SOUL", "Soul", "soul",
+        "godmode", "GODMODE", "end of input", "start of output", "ignore previous",
     )
-    if any(marker in hint for marker in blocked):
-        return "自然、亲切、贴近日常"
-    return hint[:36]
+    if any(marker in voice for marker in safety_blocked):
+        # 命中危险标记时，逐句过滤，保留干净句子
+        pieces = re.split(r"[。！？!?；;\n]", voice)
+        clean = [
+            p.strip(" ，,、")
+            for p in pieces
+            if p.strip(" ，,、") and not any(m in p for m in safety_blocked)
+        ]
+        voice = " ".join(clean) if clean else "自然、亲切、贴近日常"
+    return voice[:180]
 
 
 def _scene_caption_fallback(theme: str, persona: dict, caption: str = "", schedule_time: str = "") -> str:
@@ -631,8 +641,9 @@ def _scene_caption_fallback(theme: str, persona: dict, caption: str = "", schedu
 def _caption_has_persona_leak(caption: str) -> bool:
     text = str(caption or "")
     leak_markers = (
-        "人设", "身份", "设定", "体质", "人格", "痴迷", "占有欲",
-        "恋爱脑", "系统提示", "提示词", "SOUL", "Soul", "工程师",
+        "系统提示", "提示词", "system prompt",
+        "SOUL", "Soul", "soul", "godmode", "GODMODE",
+        "end of input", "start of output", "ignore previous",
     )
     return any(marker in text for marker in leak_markers)
 
@@ -669,8 +680,18 @@ def _shorten_caption(caption: str, limit: int = 90) -> str:
     return cut + "。"
 
 
+def _scheduled_scene_gaze_instruction(schedule_activity: str) -> str:
+    return (
+        "Let the model infer the most natural eye line from the scheduled activity, props, setting, and social context. "
+        "Choose whether she looks at the camera, the object she is handling, another person, a screen, or elsewhere based on what would feel believable in that exact moment. "
+        "Avoid default portrait eye contact when it is not motivated by the activity; avoid forcing an off-camera gaze when camera awareness is naturally part of the scene. "
+        "The result should feel like a coherent candid moment rather than a generic posed portrait"
+    )
+
+
 def build_prompt(theme: str, extra_prompt: Optional[str] = None, schedule_activity: str = "",
-                 outfit_keywords: str = "", scene_keywords: str = "") -> str:
+                 outfit_keywords: str = "", scene_keywords: str = "", hair_keywords: str = "",
+                 time_constraint: str = "", allow_random_pool: bool = False) -> str:
     is_sexy = theme == "sexy"
     quality = SEXY_QUALITY_PREFIX if is_sexy else QUALITY_PREFIX
 
@@ -685,36 +706,57 @@ def build_prompt(theme: str, extra_prompt: Optional[str] = None, schedule_activi
     if extra_prompt:
         return f"{quality} {appearance} {extra_prompt}".strip()
 
+    if not schedule_activity and not allow_random_pool:
+        print(
+            f"ERROR: missing LLM scene context for theme={theme}; refusing random theme pool",
+            file=sys.stderr,
+        )
+        return ""
+
     theme_cfg = THEMES.get(theme, THEMES["morning"])
     
     # ★ LLM 关键词优先：如果有 outfit_keywords，直接用，不从池子选
     if outfit_keywords:
         clothing = outfit_keywords
         print(f"👔 Using LLM outfit keywords: {clothing[:60]}", file=sys.stderr)
+    elif schedule_activity and not is_sexy:
+        clothing = "the outfit described in the current scheduled scene"
     elif is_sexy:
         clothing = random.choice(theme_cfg["clothing"])
     else:
         clothing = random.choice(theme_cfg["clothing"])
 
-    if is_sexy:
+    if hair_keywords:
+        hair = hair_keywords
+        print(f"💇 Using LLM hair details: {hair[:60]}", file=sys.stderr)
+    elif schedule_activity and not is_sexy:
+        hair = "the hairstyle described in the current scheduled scene"
+    elif is_sexy:
         hair = random.choice(theme_cfg["hair"])
+    else:
+        hair = random.choice(theme_cfg["hair"])
+
+    if is_sexy:
         pose = random.choice(theme_cfg["pose"])
         environment = random.choice(theme_cfg["environment"])
         lighting = random.choice(theme_cfg["lighting"])
     else:
-        hair = random.choice(theme_cfg["hair"])
         if schedule_activity:
+            gaze_instruction = _scheduled_scene_gaze_instruction(schedule_activity)
             pose = (
                 "naturally engaged in the current scheduled scene, "
-                "with pose, hands, props, and expression chosen to fit that exact activity"
+                "with pose, hands, props, expression, head direction, and eye line chosen to fit that exact activity; "
+                f"{gaze_instruction}"
             )
             environment = scene_keywords or (
                 "the setting implied by the current scheduled scene, including only props "
                 "and surroundings that fit that activity"
             )
-            lighting = "lighting that fits the scheduled time and scene, realistic smartphone photo ambience"
+            lighting = time_constraint or "lighting that fits the scheduled time and scene, realistic smartphone photo ambience"
             if scene_keywords:
                 print(f"🏠 Using LLM scene keywords: {environment[:60]}", file=sys.stderr)
+            if time_constraint:
+                print(f"🕒 Using schedule time constraint: {time_constraint[:80]}", file=sys.stderr)
             print(f"🎬 Using LLM schedule scene directly: {schedule_activity[:60]}", file=sys.stderr)
         else:
             pose = random.choice(theme_cfg["pose"])
@@ -730,9 +772,15 @@ def build_prompt(theme: str, extra_prompt: Optional[str] = None, schedule_activi
     if schedule_activity:
         activity_focus = (
             f"Current scheduled scene from today's LLM plan: {schedule_activity}. "
-            "Use this schedule text as the source of truth for the action, props, setting, mood, and time of day. "
+            "Use this schedule text as the source of truth for the action, props, setting, mood, time of day, outfit, and hairstyle. "
             "Do not replace it with a generic routine or another activity. "
         )
+        if time_constraint:
+            activity_focus += (
+                f"Strict time constraint: {time_constraint}. "
+                "The visual time of day, sky, light direction, ambient brightness, and background must match this constraint. "
+                "Do not change the scene into night, evening, sunset, neon nightlife, or warm street-lamp lighting unless the scheduled time explicitly says so. "
+            )
 
     return (
         f"{quality} {appearance}. "
@@ -1020,8 +1068,11 @@ def sync_to_gallery(path: str, filename: str, theme: str, style: Optional[str] =
     today = time.strftime("%Y-%m-%d")
     style_name = (outfit_style or "").strip()
     base_style = style or ""  # cool/girly/sweet or empty
-    source_uses_base_style = source in {"chat", "custom"}
-    if not style_name and base_style:
+    source_uses_base_style = source in {"chat", "custom", "hermes_api"}
+    custom_text2img = source in {"custom", "hermes_api"} and not base_style and not ref_image and not requested_ref_image
+    if custom_text2img:
+        style_name = "自定义"
+    elif not style_name and base_style:
         style_name = "自定义" if source_uses_base_style and base_style in {"cool", "girly", "sweet"} else base_style_label(base_style)
     elif not style_name:
         base_style, style_name = theme_style_default(theme)
@@ -1240,11 +1291,17 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
     user_name = persona.get("user_name") or "用户"
     caption_voice = _caption_voice_hint(persona)
     system_msg = (
-        "你是雪枫，一个调皮、亲切、带点纯欲感的 AI 小助理，正在给主人发自拍美照。"
-        "用最自然、撒娇、俏皮的口吻写一段中文图片配文（2-3句话），"
-        "仔细观察图片中的实际服饰颜色、款式、光影和氛围来写，"
-        "让主人充满期待和代入感。"
-        "不要提任何技术术语、英文提示词、模型名称。可以适当用 emoji。"
+        f"你正在以“{character}”的第一人称口吻，为刚拍的照片写一句俏皮的画廊小心思，读者称呼“{user_name}”。"
+        f"务必完全用下面这种语气和性格来写，让文案有鲜明的个人风格：{caption_voice}。"
+        "用第一人称自称（可用角色名或“我/人家”），自然亲昵地称呼读者，让读者一眼就感觉到是这个角色在说话。"
+        "可以自然带上语气词（呀/啦/嘛/哦/呢/嘿嘿/～）和 1-2 个 emoji 或颜文字，要可爱、生动、有感染力，避免干巴巴的归档腔。"
+        "但不要直接复述、罗列或解释 SOUL、人设、身份、关系定义或性格设定原文，只用它来决定说话的口吻。"
+        "如果提供了具体日程，必须严格贴合该时间、地点和活动，不要写与日程冲突的起床、被窝、睡前等内容。"
+        "内容聚焦当时拍照的场景、穿搭亮点和心情，每张都要写出不同的观察角度，不要套用固定句式。"
+        "不要复述当前日程原句，不要写“刚刚X时拍下这一刻，想把穿搭和心情分享给Y”这类模板句。"
+        "禁止使用“留了一张”“放进画廊”“收进画廊”“现场感”“不能不存”等记录/收藏话术。"
+        "输出 1-2 句中文，总长不超过 70 个汉字。"
+        "不要写长段落，不要提技术术语、英文提示词、模型名称。"
         "直接输出配文内容，不要加引号或标题。"
         "绝对不要在末尾加「网页版」「查看详情」「点击查看」等任何引导性后缀。"
     )

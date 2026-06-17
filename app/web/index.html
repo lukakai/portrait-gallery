@@ -1527,6 +1527,13 @@ textarea:focus-visible,
   border-radius: 10px;
   white-space: nowrap;
 }
+.tc-meta .modal-reroll-btn,
+.today-card-info .modal-reroll-btn {
+  width: 28px;
+  height: 28px;
+  font-size: 14px;
+  flex: 0 0 auto;
+}
 .tc-outfit {
   font-size: 14px;
   color: #333;
@@ -1878,12 +1885,44 @@ textarea:focus-visible,
   margin-bottom: 20px;
 }
 .cg-field { margin-bottom: 20px; }
+.cg-label-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
 .cg-field label {
   display: block;
   font-size: 16px;
   font-weight: 600;
   color: #555;
   margin-bottom: 8px;
+}
+.cg-label-row label { margin-bottom: 0; }
+.cg-mode-btn {
+  flex: 0 0 auto;
+  min-width: 40px;
+  height: 30px;
+  padding: 0 12px;
+  border-radius: 15px;
+  border: 1px solid #e0e0e0;
+  background: #fff;
+  color: #888;
+  font-size: 14px;
+  font-weight: 700;
+  line-height: 1;
+  cursor: pointer;
+  transition: all 0.2s;
+}
+.cg-mode-btn:hover {
+  border-color: #e91e63;
+  color: #e91e63;
+}
+.cg-mode-btn.active {
+  border-color: #e91e63;
+  background: #fce4ec;
+  color: #e91e63;
 }
 .cg-field textarea {
   width: 100%;
@@ -1940,6 +1979,22 @@ textarea:focus-visible,
 }
 .cg-shot-group {
   grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+.cg-select {
+  width: 100%;
+  min-height: 44px;
+  border: 1px solid #e0e0e0;
+  border-radius: 12px;
+  background: #fff;
+  color: #444;
+  font-size: 14px;
+  font-family: inherit;
+  padding: 0 12px;
+  outline: none;
+}
+.cg-select:focus {
+  border-color: #e91e63;
+  box-shadow: 0 0 0 3px rgba(233,30,99,0.08);
 }
 .cg-size-hint {
   display: flex;
@@ -2143,7 +2198,7 @@ textarea:focus-visible,
   .tab { flex: 1; padding: 9px 12px; }
   .header-gen-btn { min-height: 42px; padding: 0 16px; }
   .gallery-list { gap: 12px; }
-  .gallery-grid { grid-template-columns: repeat(auto-fit, minmax(164px, 1fr)); gap: 10px; }
+  .gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .big-card { flex-direction: column; }
   .big-card-image { flex: unset; width: 100%; min-height: 260px; aspect-ratio: 3/4; }
   .big-card-info { padding: 16px 18px; }
@@ -2156,7 +2211,7 @@ textarea:focus-visible,
 }
 @media (max-width: 560px) {
   .gallery-list { gap: 10px; }
-  .gallery-grid { grid-template-columns: repeat(auto-fit, minmax(148px, 1fr)); gap: 8px; }
+  .gallery-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
   .big-card-image { min-height: 200px; }
   .big-card-info { padding: 12px 14px; gap: 5px; }
   .big-card-info .bc-date { font-size: 11px; }
@@ -2185,11 +2240,15 @@ textarea:focus-visible,
   .cg-modal h2 { font-size: 22px; margin-bottom: 14px; }
   .cg-field { margin-bottom: 13px; }
   .cg-field label { font-size: 14px; margin-bottom: 7px; }
+  .cg-label-row { margin-bottom: 7px; }
+  .cg-label-row label { margin-bottom: 0; }
+  .cg-mode-btn { height: 28px; min-width: 38px; padding: 0 10px; font-size: 13px; }
   .cg-field textarea { min-height: 82px; padding: 12px 14px; font-size: 14px; border-radius: 12px; }
   .cg-field .hint { font-size: 12px; line-height: 1.45; }
   .cg-size-group { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 7px; }
   .cg-size-btn { min-height: 50px; padding: 7px 6px; font-size: 13px; border-radius: 12px; }
   .cg-size-btn small { font-size: 10px; margin-top: 1px; }
+  .cg-select { min-height: 40px; font-size: 13px; }
   .cg-size-hint { margin-top: 7px; padding: 7px 10px; font-size: 12px; }
   .cg-ref-grid { gap: 7px; }
   .cg-ref-item { width: calc((100% - 21px) / 4); border-width: 2px; border-radius: 9px; }
@@ -2208,6 +2267,9 @@ textarea:focus-visible,
   .gallery-list .today-compact .tc-date { font-size: 12px; }
   .gallery-list .today-compact .tc-meta-row .tc-meta-tag { font-size: 10px; }
   .gallery-list .today-compact .tc-style { font-size: 10px; padding: 2px 10px; }
+}
+@media (max-width: 340px) {
+  .gallery-grid { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* ===== Today badge on gallery cards ===== */
@@ -2237,6 +2299,41 @@ textarea:focus-visible,
 #colSliderWrap.single-value {
   gap: 6px;
   padding-inline: 14px;
+}
+#galleryScrollNav {
+  position: fixed;
+  right: 35px;
+  bottom: 92px;
+  z-index: 900;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-end;
+  gap: 14px;
+  transition: opacity 0.3s;
+  user-select: none;
+}
+#galleryScrollNav.hidden { opacity: 0; pointer-events: none; }
+#galleryScrollNav .scroll-nav-btn {
+  width: 34px;
+  height: 34px;
+  border: 1px solid rgba(233,30,99,0.15);
+  border-radius: 50%;
+  background: rgba(255,255,255,0.94);
+  color: #e91e63;
+  box-shadow: 0 4px 18px rgba(0,0,0,0.12);
+  backdrop-filter: blur(12px);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  transition: transform 0.15s, color 0.15s, background 0.15s, box-shadow 0.15s;
+}
+#galleryScrollNav .scroll-nav-btn:hover {
+  transform: translateY(-1px);
+  color: #fff;
+  background: #e91e63;
+  box-shadow: 0 6px 20px rgba(233,30,99,0.22);
 }
 #colSliderWrap .col-icon { font-size: 16px; }
 #colSliderWrap .col-val {
@@ -2312,6 +2409,44 @@ textarea:focus-visible,
 
 /* 5 columns (default) — no override needed, uses base CSS */
 
+/* 3 columns: tablet / large phone */
+.gallery-grid.cols-3 .gallery-card .card-body { padding: 10px 9px 12px; }
+.gallery-grid.cols-3 .gallery-card .card-body .card-row1 .date,
+.gallery-grid.cols-3 .gallery-card .card-body .card-row1 .time { font-size: 12px; }
+.gallery-grid.cols-3 .gallery-card .card-body .card-meta .meta-tag { font-size: 10.5px; padding: 2px 6px; border-radius: 10px; }
+.gallery-grid.cols-3 .gallery-card .card-body .card-actions { gap: 5px; padding-top: 7px; }
+.gallery-grid.cols-3 .gallery-card .card-body .card-actions .ca-btn { min-height: 33px; font-size: 12px; padding: 0 6px; }
+.gallery-grid.cols-3 .gallery-card .card-date-tag,
+.gallery-grid.cols-3 .gallery-card .card-style-tag { font-size: 12px; padding: 3px 9px; }
+
+/* 2 columns: phones */
+.gallery-grid.cols-2 .gallery-card { border-radius: 18px; }
+.gallery-grid.cols-2 .gallery-card .card-body { padding: 11px 10px 13px; gap: 6px; }
+.gallery-grid.cols-2 .gallery-card .card-body .card-row1 .date,
+.gallery-grid.cols-2 .gallery-card .card-body .card-row1 .time { font-size: 13px; }
+.gallery-grid.cols-2 .gallery-card .card-body .card-meta { gap: 4px 5px; }
+.gallery-grid.cols-2 .gallery-card .card-body .card-meta .meta-tag { font-size: 11px; padding: 2px 7px; border-radius: 11px; }
+.gallery-grid.cols-2 .gallery-card .card-body .card-actions { gap: 7px; margin-top: 8px; padding-top: 8px; }
+.gallery-grid.cols-2 .gallery-card .card-body .card-actions .ca-btn { min-height: 36px; font-size: 13px; padding: 0 7px; }
+.gallery-grid.cols-2 .gallery-card .card-body .card-actions .ca-btn .ca-icon { font-size: 14px; }
+.gallery-grid.cols-2 .gallery-card .card-date-tag,
+.gallery-grid.cols-2 .gallery-card .card-style-tag { top: 9px; font-size: 12px; padding: 3px 9px; border-radius: 8px; }
+
+/* 1 column: very narrow phones / user preference */
+.gallery-grid.cols-1 {
+  max-width: 420px;
+  margin-inline: auto;
+}
+.gallery-grid.cols-1 .gallery-card { border-radius: 20px; }
+.gallery-grid.cols-1 .gallery-card .card-body { padding: 13px 14px 15px; gap: 8px; }
+.gallery-grid.cols-1 .gallery-card .card-body .card-row1 .date,
+.gallery-grid.cols-1 .gallery-card .card-body .card-row1 .time { font-size: 14px; }
+.gallery-grid.cols-1 .gallery-card .card-body .card-meta .meta-tag { font-size: 12px; padding: 3px 9px; border-radius: 12px; }
+.gallery-grid.cols-1 .gallery-card .card-body .card-actions { gap: 9px; margin-top: 9px; padding-top: 9px; }
+.gallery-grid.cols-1 .gallery-card .card-body .card-actions .ca-btn { min-height: 40px; font-size: 14px; }
+.gallery-grid.cols-1 .gallery-card .card-date-tag,
+.gallery-grid.cols-1 .gallery-card .card-style-tag { top: 10px; font-size: 13px; padding: 4px 10px; border-radius: 9px; }
+
 /* 4 columns: largest */
 .gallery-grid.cols-4 .gallery-card .card-body { padding: 10px 8px 12px; }
 .gallery-grid.cols-4 .gallery-card .card-body .card-row1 .date,
@@ -2383,7 +2518,8 @@ textarea:focus-visible,
 }
 .egg-section-title-main { display: inline-flex; align-items: center; gap: 6px; min-width: 0; }
 .egg-title-actions { display: inline-flex; align-items: center; justify-content: flex-end; gap: 8px; min-width: 0; }
-.egg-outfit-fav-btn {
+.egg-outfit-fav-btn,
+.egg-outfit-dislike-btn {
   min-height: 36px;
   min-width: 94px;
   max-width: 136px;
@@ -2404,10 +2540,21 @@ textarea:focus-visible,
   box-shadow: 0 6px 14px rgba(233,30,99,0.08);
   transition: background 0.18s ease, color 0.18s ease, border-color 0.18s ease, box-shadow 0.18s ease;
 }
-.egg-outfit-fav-btn span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.egg-outfit-dislike-btn {
+  min-width: 82px;
+  max-width: 118px;
+  border-color: rgba(100,116,139,0.22);
+  color: #64748b;
+  box-shadow: 0 6px 14px rgba(100,116,139,0.08);
+}
+.egg-outfit-fav-btn span,
+.egg-outfit-dislike-btn span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .egg-outfit-fav-btn:hover { background: #fff7fb; border-color: rgba(233,30,99,0.36); }
 .egg-outfit-fav-btn.active { background: linear-gradient(135deg, #ff2d8d, #c026d3); border-color: transparent; color: #fff; box-shadow: 0 8px 18px rgba(233,30,99,0.22); }
-.egg-outfit-fav-btn:disabled { cursor: default; opacity: 0.58; box-shadow: none; }
+.egg-outfit-dislike-btn:hover { background: #f8fafc; border-color: rgba(100,116,139,0.38); }
+.egg-outfit-dislike-btn.active { background: linear-gradient(135deg, #64748b, #334155); border-color: transparent; color: #fff; box-shadow: 0 8px 18px rgba(51,65,85,0.18); }
+.egg-outfit-fav-btn:disabled,
+.egg-outfit-dislike-btn:disabled { cursor: default; opacity: 0.58; box-shadow: none; }
 .egg-outfit-view-btn {
   min-height: 30px;
   min-width: 52px;
@@ -2534,6 +2681,7 @@ textarea:focus-visible,
   .egg-section-title.with-action { grid-template-columns: 1fr; align-items: start; }
   .egg-title-actions { justify-self: end; flex-wrap: wrap; max-width: 100%; }
   .egg-outfit-fav-btn { min-width: 94px; }
+  .egg-outfit-dislike-btn { min-width: 82px; }
   .egg-outfit-view-btn { min-width: 52px; }
   .egg-photo-item { grid-template-columns: auto 48px auto minmax(0, 1fr) auto; }
   .egg-photo-style { grid-column: 5; grid-row: 1; justify-self: end; }
@@ -2668,7 +2816,7 @@ textarea:focus-visible,
     <h1 style="user-select:none;"><span class="app-logo" id="appHeaderLogo" aria-hidden="true">🌸</span><span id="appHeaderTitle">雪枫的穿搭画廊</span> <span class="version-tag" id="versionTag">v1.1.6</span></h1>
   </div>
   <div class="tabs">
-    <button class="tab" data-tab="gallery" onclick="switchTab('gallery')"><span class="tab-label">✨ 全部</span><span class="tab-badge" id="badge-all">0</span></button>
+    <button class="tab" data-tab="gallery" onclick="switchTab('gallery')" ondblclick="showUnfavoriteGallery(event)"><span class="tab-label">✨ 全部</span><span class="tab-badge" id="badge-all">0</span></button>
     <button class="tab" data-tab="today" onclick="switchTab('today')"><span class="tab-label">🌸 今日</span><span class="tab-badge" id="badge-today">0</span></button>
     <button class="tab" data-tab="favorites" onclick="switchTab('favorites')"><span class="tab-label">❤️ 收藏</span><span class="tab-badge" id="badge-favorites">0</span></button>
   </div>
@@ -2790,13 +2938,13 @@ textarea:focus-visible,
     </div>
     <div class="sk-field">
       <label for="skGptBaseUrl">GPT Image Base URL</label>
-      <div class="sk-desc">GPT 生图端点；只有需要走 CPA 的 GPT 生图时才替换</div>
-      <input type="text" id="skGptBaseUrl" placeholder="留空则使用配置默认值">
+      <div class="sk-desc">OpenAI 兼容生图端点，默认使用 /v1/images/generations</div>
+      <input type="text" id="skGptBaseUrl" placeholder="例如 http://127.0.0.1:8090/v1/images/generations">
       <div class="sk-status" id="skGptBaseUrlStatus">加载中...</div>
     </div>
     <div class="sk-field">
       <label for="skGptKey">GPT Image Key</label>
-      <div class="sk-desc">GPT Image 生图密钥</div>
+      <div class="sk-desc">端点需要鉴权时填写；本地或免密中转可留空</div>
       <input type="password" id="skGptKey" placeholder="输入新密钥（留空则不修改）">
       <div class="sk-status" id="skGptStatus">加载中...</div>
     </div>
@@ -2857,7 +3005,7 @@ textarea:focus-visible,
       <div class="sk-footer-main">
         <div class="sk-update-row">
           <button class="btn btn-secondary" id="checkUpdateBtn" onclick="checkUpdate()">🔍 检查更新</button>
-          <span class="sk-version-text">当前版本 <span id="settingsVersion">v1.1.6</span></span>
+          <span class="sk-version-text">当前版本 <span id="settingsVersion">v1.1.8</span></span>
         </div>
         <div class="sk-actions">
           <button class="btn btn-secondary" onclick="closeSettings()">关闭</button>
@@ -2876,7 +3024,10 @@ textarea:focus-visible,
   <div class="cg-modal" onclick="event.stopPropagation()">
     <h2>🎀 穿搭生成</h2>
     <div class="cg-field">
-      <label for="cgPrompt">穿搭描述</label>
+      <div class="cg-label-row">
+        <label for="cgPrompt">穿搭描述</label>
+        <button class="cg-mode-btn" type="button" id="cgPureBtn" aria-pressed="false" aria-label="纯模式" title="不注入外貌提示词" onclick="toggleCustomPureMode()">纯</button>
+      </div>
       <textarea id="cgPrompt" placeholder="描述你想看到的穿搭，比如：穿着粉色JK制服在樱花树下吃团子~" rows="3"></textarea>
       <div class="hint">支持中英文，越详细效果越好哦～</div>
     </div>
@@ -2905,10 +3056,19 @@ textarea:focus-visible,
     <div class="cg-field">
       <label>拍摄视角</label>
       <div class="cg-size-group cg-shot-group" id="cgShotGroup">
-        <button class="cg-size-btn active" data-shot="selfie">自拍 <small>手持手机</small></button>
-        <button class="cg-size-btn" data-shot="half_body">半身照 <small>穿搭</small></button>
-        <button class="cg-size-btn" data-shot="full_body">全身照 <small>全套</small></button>
+        <button class="cg-size-btn active" data-shot="selfie">自拍 <small>手机/对镜</small></button>
+        <button class="cg-size-btn" data-shot="half_body">半身照 <small>默认</small></button>
+        <button class="cg-size-btn" data-shot="full_body">全身照 <small>OOTD</small></button>
       </div>
+    </div>
+    <div class="cg-field">
+      <label for="cgModelSelect">生图模型</label>
+      <select class="cg-select" id="cgModelSelect">
+        <option value="">默认模型</option>
+        <option value="gpt-image-2">gpt-image-2</option>
+        <option value="agnes-image-2.1-flash">agnes-image-2.1-flash</option>
+      </select>
+      <div class="hint" id="cgModelHint">默认模型</div>
     </div>
     <div class="cg-field">
       <label>参考图（可选，用于图生图）</label>
@@ -2978,6 +3138,7 @@ let allEntries = [];
 let todayData = null;  // {date, photos: [...], schedule, outfit_style}
 let currentTagFilter = "";
 let showFavoritesOnly = false;
+let showUnfavoritesOnly = false;
 let showTodayOnly = false;
 let photoRetryPollTimer = null;
 const favoriteRequests = new Set();
@@ -3054,6 +3215,25 @@ function filterByTag(tag) {
   switchTab('gallery');
 }
 
+function showUnfavoriteGallery(event) {
+  if (event) {
+    event.preventDefault();
+    event.stopPropagation();
+  }
+  currentTagFilter = "";
+  const todaySec = document.getElementById("todaySection");
+  const gallerySec = document.getElementById("gallerySection");
+  document.querySelectorAll(".tab").forEach(t => t.classList.remove("active"));
+  document.querySelector('.tab[data-tab="gallery"]')?.classList.add("active");
+  window.galleryStorageSet('active_tab', 'gallery');
+  if (todaySec) todaySec.classList.remove("visible");
+  if (gallerySec) gallerySec.classList.remove("hidden");
+  showFavoritesOnly = false;
+  showUnfavoritesOnly = true;
+  showTodayOnly = false;
+  renderGallery();
+}
+
 function isBaseModelStyle(style) {
   return ["cool", "girly", "sweet"].includes(String(style || "").trim().toLowerCase());
 }
@@ -3097,6 +3277,16 @@ function displayGenerationTimeMeta(e) {
   const minutes = Math.floor(total / 60);
   const rest = total % 60;
   return rest ? `⏱ ${minutes}m${rest}s` : `⏱ ${minutes}m`;
+}
+
+function renderRerollButton(entry, options = {}) {
+  const imgId = entry && entry.image_filename;
+  if (!imgId || !entry.prompt) return "";
+  const idAttr = options.id ? ` id="${escapeAttr(options.id)}"` : "";
+  const onClick = options.modal
+    ? "rerollModalImage(event)"
+    : "rerollImage(this.dataset.img, event, this)";
+  return `<button type="button" class="modal-reroll-btn"${idAttr} data-img="${escapeAttr(imgId)}" onclick="${onClick}" title="抽卡新图" aria-label="抽卡新图">↻</button>`;
 }
 
 function matchesOutfitStyleFilter(e, filterLower) {
@@ -3180,6 +3370,77 @@ function removeLocalImage(imgId) {
   }
 }
 
+function replaceEntryInList(list, oldImgId, freshEntry) {
+  if (!Array.isArray(list) || !freshEntry || !freshEntry.image_filename) return false;
+  const newImgId = freshEntry.image_filename;
+  const originalIndex = list.findIndex(e => e && (e.image_filename === oldImgId || e.image_filename === newImgId));
+  if (originalIndex < 0) return false;
+  const previous = list[originalIndex] || {};
+  list[originalIndex] = Object.assign({}, previous, freshEntry);
+  for (let i = list.length - 1; i >= 0; i--) {
+    if (i === originalIndex) continue;
+    const img = list[i] && list[i].image_filename;
+    if (img === oldImgId || img === newImgId) list.splice(i, 1);
+  }
+  return true;
+}
+
+function replaceLocalImage(oldImgId, freshEntry) {
+  const fresh = Object.assign({}, freshEntry || {});
+  if (!fresh.image_filename) return false;
+  const replacedAll = replaceEntryInList(allEntries, oldImgId, fresh);
+  let replacedToday = false;
+  if (todayData && Array.isArray(todayData.photos)) {
+    replacedToday = replaceEntryInList(todayData.photos, oldImgId, fresh);
+  }
+  return replacedAll || replacedToday;
+}
+
+function findGalleryCardByImg(imgId) {
+  if (!imgId) return null;
+  return Array.from(document.querySelectorAll("[data-gallery-img]"))
+    .find(el => el.dataset.galleryImg === imgId) || null;
+}
+
+function nearestGalleryCard(card) {
+  if (!card) return null;
+  let candidate = card.nextElementSibling;
+  while (candidate && !candidate.dataset.galleryImg) candidate = candidate.nextElementSibling;
+  if (candidate) return candidate;
+  candidate = card.previousElementSibling;
+  while (candidate && !candidate.dataset.galleryImg) candidate = candidate.previousElementSibling;
+  return candidate || null;
+}
+
+function captureGalleryViewportAnchor(imgId, event) {
+  const scrollEl = document.scrollingElement || document.documentElement;
+  const sourceCard = (event && event.currentTarget && event.currentTarget.closest("[data-gallery-img]"))
+    || findGalleryCardByImg(imgId);
+  const anchorCard = nearestGalleryCard(sourceCard);
+  return {
+    scrollTop: scrollEl ? scrollEl.scrollTop : window.scrollY,
+    anchorImg: anchorCard ? anchorCard.dataset.galleryImg : "",
+    anchorTop: anchorCard ? anchorCard.getBoundingClientRect().top : 0
+  };
+}
+
+function restoreGalleryViewportAnchor(anchor) {
+  if (!anchor) return;
+  const restore = () => {
+    const scrollEl = document.scrollingElement || document.documentElement;
+    const anchorCard = findGalleryCardByImg(anchor.anchorImg);
+    if (anchorCard) {
+      window.scrollBy(0, anchorCard.getBoundingClientRect().top - anchor.anchorTop);
+    } else if (scrollEl) {
+      scrollEl.scrollTop = anchor.scrollTop;
+    }
+  };
+  requestAnimationFrame(() => {
+    restore();
+    setTimeout(restore, 80);
+  });
+}
+
 // ===== Tab switching =====
 function switchTab(tab) {
   const todaySec = document.getElementById("todaySection");
@@ -3192,18 +3453,21 @@ function switchTab(tab) {
     todaySec.classList.add("visible");
     gallerySec.classList.add("hidden");
     showFavoritesOnly = false;
+    showUnfavoritesOnly = false;
     showTodayOnly = true;
     renderToday();
   } else if (tab === "favorites") {
     todaySec.classList.remove("visible");
     gallerySec.classList.remove("hidden");
     showFavoritesOnly = true;
+    showUnfavoritesOnly = false;
     showTodayOnly = false;
     renderGallery();
   } else {
     todaySec.classList.remove("visible");
     gallerySec.classList.remove("hidden");
     showFavoritesOnly = false;
+    showUnfavoritesOnly = false;
     showTodayOnly = false;
     renderGallery();
   }
@@ -3295,8 +3559,29 @@ function renderThoughtBlock(caption, className = "tc-thought") {
   return `<div class="${className}"><span class="tc-thought-label" title="思考" aria-label="思考">💭</span><span class="tc-thought-text">${captionHtml}</span></div>`;
 }
 
+function isHermesApiEntry(e) {
+  if (!e) return false;
+  const source = String(e.source || "").toLowerCase();
+  const apiSource = String(e.api_source || e.caller || e.client || "").toLowerCase();
+  const filename = String(e.image_filename || e.id || "");
+  return source === "hermes_api"
+    || source === "hermes-api"
+    || source === "hermes"
+    || apiSource.includes("hermes")
+    || filename.startsWith("hermes_");
+}
+
+function customGenerationModeLabel(e) {
+  if (!e) return "";
+  const mode = String(e.generation_mode || e.requested_generation_mode || e.custom_ref_mode || "").toLowerCase();
+  if (mode === "reference" || mode === "img2img" || mode === "image-to-image") return "图生图";
+  if (mode === "text2img" || mode === "text-to-image" || mode === "pure") return "文生图";
+  return "";
+}
+
 function modalSourceLabel(e) {
   const source = String((e && e.source) || "").toLowerCase();
+  if (isHermesApiEntry(e)) return "Hermes API";
   if (e && e.metadata_only) return "聊天生图";
   if (source === "chat") return "聊天生图";
   if (source === "custom") return "自定义生图";
@@ -3306,12 +3591,56 @@ function modalSourceLabel(e) {
   return "";
 }
 
+function isPureCustomPrompt(e) {
+  if (!e) return false;
+  const mode = String(e.prompt_mode || e.custom_prompt_mode || "").toLowerCase();
+  const rawPure = e.pure_prompt;
+  const pure = rawPure === true || String(rawPure || "").toLowerCase() === "true" || rawPure === 1 || rawPure === "1";
+  return pure || mode === "pure";
+}
+
+function customShotLabelFromType(value) {
+  const shot = String(value || "").toLowerCase();
+  if (shot === "selfie") return "自拍";
+  if (shot === "half_body" || shot === "halfbody") return "半身照";
+  if (shot === "full_body" || shot === "fullbody") return "全身照";
+  return "";
+}
+
+function customShotAngleLabel(e) {
+  if (!e) return "";
+  const fieldLabel = customShotLabelFromType(e.shot_type || e.custom_shot_type || e.shot);
+  if (fieldLabel) return fieldLabel;
+  const outfit = String(e.outfit || "");
+  const match = outfit.match(/视角[:：]\s*([^ \n，,。；;]+)(?=\s*穿搭[:：]|[\s，,。；;]|$)/);
+  return match ? match[1].trim() : "";
+}
+
+function modalOutfitLabel(e) {
+  if (isHermesApiEntry(e)) return "描述";
+  if (String((e && e.source) || "").toLowerCase() !== "custom") return "穿搭";
+  return isPureCustomPrompt(e) ? "描述" : "注入";
+}
+
 function modalSourceContext(e) {
   const label = modalSourceLabel(e);
   if (!label) return "";
+  let context = label;
   const style = displayOutfitStyle(e);
-  if (style && style !== "自定义" && !label.includes(style)) return `${label} · ${style}`;
-  return label;
+  if (style && style !== "自定义" && !context.includes(style)) context += ` · ${style}`;
+  if (isHermesApiEntry(e)) {
+    const modeLabel = customGenerationModeLabel(e);
+    if (modeLabel && !context.includes(modeLabel)) context += ` · ${modeLabel}`;
+    const shotLabel = customShotAngleLabel(e);
+    if (shotLabel && !context.includes(shotLabel)) context += ` · 视角 ${shotLabel}`;
+    return context;
+  }
+  if (String((e && e.source) || "").toLowerCase() === "custom") {
+    if (isPureCustomPrompt(e)) context += " · 纯";
+    const shotLabel = customShotAngleLabel(e);
+    if (shotLabel && !context.includes(shotLabel)) context += ` · 视角 ${shotLabel}`;
+  }
+  return context;
 }
 
 function openTodayModal(filename) {
@@ -3355,34 +3684,14 @@ function renderToday() {
     // Outfit text (extract from "风格：xxx 穿搭：yyy")
     const outfitText = extractOutfitText(today.outfit || "");
 
-    // Schedule items — prefer schedule_time field, fallback to parsing full schedule
+    // Schedule items: a photo card only shows its own matched schedule slot.
     let schedHtml = "";
-    const schedSource = today.schedule_time || today.schedule || "";
+    const schedSource = today.schedule_time || "";
     if (schedSource && schedSource !== "生成失败") {
       let slots = [];
       if (today.schedule_time) {
         // New format: schedule_time is the matched activity text
         slots = today.schedule_time.split(/[；;。\n]+/).map(s => s.trim()).filter(Boolean);
-      } else {
-        // Legacy: parse full schedule by time patterns
-        let normalized = schedSource
-          .replace(/(?:早上|清晨|上午)\s*(\d{1,2})点/g, '$1:00')
-          .replace(/(?:中午)\s*(\d{1,2})点/g, '$1:00')
-          .replace(/(?:下午|午后)\s*(\d{1,2})点/g, (_, h) => `${parseInt(h)+12}:00`)
-          .replace(/(?:晚上|傍晚|晚间)\s*(\d{1,2})点/g, (_, h) => `${parseInt(h)+12}:00`)
-          .replace(/(\d{1,2})点/g, '$1:00');
-        const allSlots = normalized.match(/\d{1,2}:\d{2}.*?(?=\d{1,2}:\d{2}|$)/g) || [];
-        const photoHour = today.time ? parseInt(today.time.split(":")[0], 10) : -1;
-        const photoPeriod = photoHour < 12 ? 'morning' : photoHour < 18 ? 'afternoon' : 'evening';
-        const relevant = allSlots.filter(slot => {
-          const m = slot.match(/^(\d{1,2}):\d{2}/);
-          if (!m) return true;
-          const h = parseInt(m[1], 10);
-          if (photoPeriod === 'morning') return h < 12;
-          if (photoPeriod === 'afternoon') return h >= 12 && h < 18;
-          return h >= 18;
-        });
-        slots = (relevant.length ? relevant : allSlots).map(s => s.trim());
       }
       if (slots.length) {
         schedHtml = slots.map(slot => {
@@ -3394,9 +3703,10 @@ function renderToday() {
     }
 
     const captionHtml = renderThoughtBlock(today.caption, "modal-caption tc-thought");
+    const metaHtml = `${today.model_name ? `<span class="meta-tag">🤖 ${today.model_name}</span>` : ""}${displayReferenceMeta(today) ? `<span class="meta-tag">${displayReferenceMeta(today)}</span>` : ""}${displayImageSizeMeta(today) ? `<span class="meta-tag">${displayImageSizeMeta(today)}</span>` : ""}${displayFileSizeMeta(today) ? `<span class="meta-tag">${displayFileSizeMeta(today)}</span>` : ""}${displayGenerationTimeMeta(today) ? `<span class="meta-tag">${displayGenerationTimeMeta(today)}</span>` : ""}${renderRerollButton(today)}`;
 
     html += `
-      <div class="today-compact" style="cursor:default;">
+      <div class="today-compact" data-gallery-img="${escapeAttr(today.image_filename || '')}" style="cursor:default;">
         <div class="tc-image">
           <img src="/images/${today.image_filename}" alt="今日穿搭" decoding="async" onclick="openViewer('/images/${today.image_filename}')" style="cursor:pointer;">
         </div>
@@ -3406,7 +3716,7 @@ function renderToday() {
             ${displayOutfitStyle(today) ? `<span class="modal-style" onclick="event.stopPropagation();filterByTag('${displayOutfitStyle(today)}');">${displayOutfitStyle(today)}</span>` : ""}
           </div>
           <div>
-            <span class="modal-meta" style="margin:0;padding:0;background:none;">${today.model_name ? `<span class="meta-tag">🤖 ${today.model_name}</span>` : ""}${displayReferenceMeta(today) ? `<span class="meta-tag">${displayReferenceMeta(today)}</span>` : ""}${displayImageSizeMeta(today) ? `<span class="meta-tag">${displayImageSizeMeta(today)}</span>` : ""}${displayFileSizeMeta(today) ? `<span class="meta-tag">${displayFileSizeMeta(today)}</span>` : ""}${displayGenerationTimeMeta(today) ? `<span class="meta-tag">${displayGenerationTimeMeta(today)}</span>` : ""}</span>
+            <span class="modal-meta" style="margin:0;padding:0;background:none;">${metaHtml}</span>
           </div>
           <div class="modal-outfit">${outfitText ? `<span class="outfit-label">穿搭</span><span class="outfit-divider">|</span><span class="outfit-text">${outfitText}</span>` : '--'}</div>
           ${schedHtml ? `<div class="modal-schedule">${schedHtml}</div>` : ""}
@@ -3415,7 +3725,7 @@ function renderToday() {
             <button class="mbtn" onclick="event.stopPropagation();toggleFavorite('${today.image_filename}');"><i class="${today.favorite ? 'fa-solid' : 'fa-regular'} fa-heart btn-icon" aria-hidden="true"></i> 收藏</button>
             <button class="mbtn" onclick="event.stopPropagation();shareImage('${today.image_filename}');"><i class="fa-solid fa-share-nodes btn-icon" aria-hidden="true"></i> 分享</button>
             <button class="mbtn" onclick="event.stopPropagation();showPrompt(this)" data-prompt="${encodeURIComponent(today.prompt || '')}"><i class="fa-regular fa-pen-to-square btn-icon" aria-hidden="true"></i> 提示词</button>
-            <button class="mbtn danger" onclick="event.stopPropagation();deleteImage('${today.image_filename}');"><i class="fa-regular fa-trash-can btn-icon" aria-hidden="true"></i> 删除</button>
+            <button class="mbtn danger" onclick="event.stopPropagation();deleteImage('${today.image_filename}', event);"><i class="fa-regular fa-trash-can btn-icon" aria-hidden="true"></i> 删除</button>
           </div>
         </div>
       </div>`;
@@ -3459,6 +3769,9 @@ function renderGallery() {
   }
   if (showFavoritesOnly) {
     filtered = filtered.filter(e => e.favorite === true);
+  }
+  if (showUnfavoritesOnly) {
+    filtered = filtered.filter(e => e.favorite !== true);
   }
   if (currentTagFilter) {
     const filterLower = currentTagFilter.toLowerCase();
@@ -3519,8 +3832,11 @@ function renderGallery() {
   if (showFavoritesOnly) {
     headerHtml = `<div class="filter-bar">🩷 只看收藏 <button class="filter-clear" onclick="switchTab('gallery')">✕ 查看全部</button></div>`;
   }
+  if (showUnfavoritesOnly) {
+    headerHtml = `<div class="filter-bar">🤍 只看未收藏 <button class="filter-clear" onclick="switchTab('gallery')">✕ 查看全部</button></div>`;
+  }
   // Style filter bar for gallery tab
-  if (!showTodayOnly && !showFavoritesOnly) {
+  if (!showTodayOnly && !showFavoritesOnly && !showUnfavoritesOnly) {
     const styles = [...new Set(allEntries.map(e => displayOutfitStyle(e)).filter(Boolean))].sort();
     if (styles.length) {
       const stylePills = styles.map(s => {
@@ -3557,6 +3873,7 @@ function renderGallery() {
           if (fileSizeLabel) metaHtml += `<span class="tc-meta-tag">${fileSizeLabel}</span>`;
           const generationTimeLabel = displayGenerationTimeMeta(e);
           if (generationTimeLabel) metaHtml += `<span class="tc-meta-tag">${generationTimeLabel}</span>`;
+          metaHtml += renderRerollButton(e);
           // Period row: show matching schedule period or fallback to time
           let periodHtml = '';
           if (showTodayOnly) {
@@ -3569,7 +3886,7 @@ function renderGallery() {
             }
           }
           return `
-            <div class="today-compact">
+            <div class="today-compact" data-gallery-img="${escapeAttr(e.image_filename || '')}">
               <div class="tc-image" onclick="event.stopPropagation();openViewer('/images/${e.image_filename}')" style="cursor:zoom-in;">
                 ${imgHtml}
               </div>
@@ -3605,7 +3922,7 @@ function renderGallery() {
           const referenceLabel = displayReferenceMeta(e);
           if (referenceLabel) metaHtml += `<span class="meta-tag meta-ref">${referenceLabel}</span>`;
           return `
-            <div class="gallery-card" onclick="event.stopPropagation();openModal(allEntries.find(x=>x.image_filename==='${e.image_filename}'))">
+            <div class="gallery-card" data-gallery-img="${escapeAttr(e.image_filename || '')}" onclick="event.stopPropagation();openModal(allEntries.find(x=>x.image_filename==='${e.image_filename}'))">
               <div class="card-img-wrap">
                 ${imgHtml}
                 <span class="card-date-tag">${shortDate(e.date)}</span>
@@ -3728,6 +4045,25 @@ ms.textContent = `
 .modal-outfit .outfit-label { background:#fff;color:#e91e63;padding:3px 14px;border-radius:14px;font-size:13px;font-weight:600;letter-spacing:0.5px;white-space:nowrap;border:1.5px solid #e91e63;box-shadow:0 2px 6px rgba(233,30,99,0.12); }
 .modal-outfit .outfit-divider { color:#ccc;font-size:14px; }
 .modal-outfit .outfit-text { color:#555;flex:1;min-width:200px; }
+.outfit-magic-btn {
+  width: 30px;
+  height: 30px;
+  border: 1.5px solid rgba(233,30,99,0.18);
+  border-radius: 999px;
+  background: #fff;
+  color: #e91e63;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  flex: 0 0 auto;
+  transition: all 0.18s ease;
+  box-shadow: 0 2px 8px rgba(233,30,99,0.08);
+}
+.outfit-magic-btn:hover { border-color:#e91e63;background:#fce4ec;transform:translateY(-1px);box-shadow:0 6px 16px rgba(233,30,99,0.14); }
+.outfit-magic-btn:disabled { opacity:0.58;cursor:default;transform:none; }
+.outfit-magic-btn.loading i { animation: modalMagicSpin 0.85s linear infinite; }
+@keyframes modalMagicSpin { from { transform: rotate(0deg); } to { transform: rotate(360deg); } }
 .today-compact .modal-outfit .outfit-text,
 .modal-content .today-card-info .modal-outfit .outfit-text { white-space:normal;overflow:visible;text-overflow:clip;max-width:none;-webkit-line-clamp:unset;display:block; }
 .today-compact .modal-outfit,
@@ -3958,11 +4294,14 @@ function openModal(e) {
   if (fileSizeLabel) metaHtml += `<span class="meta-tag">${fileSizeLabel}</span>`;
   const generationTimeLabel = displayGenerationTimeMeta(e);
   if (generationTimeLabel) metaHtml += `<span class="meta-tag">${generationTimeLabel}</span>`;
-  if (e.prompt) metaHtml += `<button class="modal-reroll-btn" id="modalRerollBtn" onclick="rerollModalImage(event)" title="抽卡新图" aria-label="抽卡新图">↻</button>`;
+  metaHtml += renderRerollButton(e, {id: "modalRerollBtn", modal: true});
   document.getElementById("modalMeta").innerHTML = metaHtml;
   document.getElementById("modalMeta").style.display = metaHtml ? "flex" : "none";
+  const outfitMagicBtn = e.image_filename
+    ? `<button type="button" class="outfit-magic-btn" onclick="quickCustomImg2ImgFromModal(event,this)" title="用自定义输入框提示词图生图" aria-label="用自定义输入框提示词图生图"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i></button>`
+    : "";
   document.getElementById("modalOutfit").innerHTML = e.outfit
-    ? `<span class="outfit-label">穿搭</span><span class="outfit-divider">|</span><span class="outfit-text">${extractOutfitText(e.outfit)}</span>`
+    ? `<span class="outfit-label">${modalOutfitLabel(e)}</span><span class="outfit-divider">|</span><span class="outfit-text">${extractOutfitText(e.outfit)}</span>${outfitMagicBtn}`
     : '--';
   // Schedule
   const schedEl = document.getElementById("modalSchedule");
@@ -4076,19 +4415,23 @@ function confirmDeleteImage() {
   return new Promise(resolve => { deleteConfirmResolve = resolve; });
 }
 
-async function rerollModalImage(event) {
+function setRerollButtonLoading(btn, loading) {
+  if (!btn) return;
+  btn.disabled = loading;
+  btn.classList.toggle("spinning", loading);
+  btn.textContent = loading ? "⟳" : "↻";
+}
+
+async function rerollImage(imgId, event, btn, options = {}) {
   if (event) event.stopPropagation();
-  if (!currentModalImg) return;
-  const btn = document.getElementById("modalRerollBtn");
+  if (!imgId) return;
   if (btn && btn.disabled) return;
-  if (btn) {
-    btn.disabled = true;
-    btn.classList.add("spinning");
-    btn.textContent = "⟳";
-  }
+  const shouldOpenModal = Boolean(options.openFreshModal || (modalOverlay.classList.contains("open") && currentModalImg === imgId));
+  const viewportAnchor = captureGalleryViewportAnchor(imgId, event);
+  setRerollButtonLoading(btn, true);
   showToast("🎲 正在抽一张新图...");
   try {
-    const res = await fetch(`${API}/api/images/${encodeURIComponent(currentModalImg)}/reroll`, {
+    const res = await fetch(`${API}/api/images/${encodeURIComponent(imgId)}/reroll`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
       body: JSON.stringify({})
@@ -4098,20 +4441,25 @@ async function rerollModalImage(event) {
       showToast("❌ 抽卡失败" + (data.error ? ": " + data.error : ""));
       return;
     }
-    await loadGallery();
-    const fresh = allEntries.find(x => x.image_filename === data.image_filename) || data;
-    showToast("✨ 新图抽好啦");
-    openModal(fresh);
+    const fresh = data;
+    const oldImgId = data.replaced_image_filename || imgId;
+    replaceLocalImage(oldImgId, fresh);
+    renderActivePhotoView();
+    updateBadges();
+    window.applyGalleryColumns?.();
+    restoreGalleryViewportAnchor(viewportAnchor);
+    showToast("✨ 已替换成新图");
+    if (shouldOpenModal) openModal(fresh);
   } catch(e) {
     showToast("❌ " + e.message);
   } finally {
-    const activeBtn = document.getElementById("modalRerollBtn");
-    if (activeBtn) {
-      activeBtn.disabled = false;
-      activeBtn.classList.remove("spinning");
-      activeBtn.textContent = "↻";
-    }
+    const activeBtn = shouldOpenModal ? document.getElementById("modalRerollBtn") : btn;
+    setRerollButtonLoading(activeBtn && activeBtn.isConnected ? activeBtn : null, false);
   }
+}
+
+async function rerollModalImage(event) {
+  return rerollImage(currentModalImg, event, document.getElementById("modalRerollBtn"), {openFreshModal: true});
 }
 
 // ===== Delete & Share =====
@@ -4137,6 +4485,7 @@ async function deleteImage(imgId, event) {
     }
     if (data.success) {
       // Remove from local entries: match by image_filename OR by date key
+      const viewportAnchor = captureGalleryViewportAnchor(imgId, event);
       removeLocalImage(imgId);
       if (currentModalImg === imgId) {
         currentModalImg = "";
@@ -4144,6 +4493,7 @@ async function deleteImage(imgId, event) {
       }
       renderActivePhotoView();
       updateBadges();
+      restoreGalleryViewportAnchor(viewportAnchor);
       showToast("🗑 已删除");
     } else {
       showToast("❌ 删除失败" + (data.error ? ": " + data.error : ""));
@@ -4221,6 +4571,9 @@ const BUILTIN_REF_FALLBACKS = [
   { filename: "ref_style_girly.jpg", url: "/local-refs/ref_style_girly.jpg", style: "girly", label: "少女风", builtin: true },
   { filename: "ref_style_sweet.jpg", url: "/local-refs/ref_style_sweet.jpg", style: "sweet", label: "甜妹风", builtin: true }
 ];
+const CUSTOM_IMAGE_MODEL_FALLBACKS = ["gpt-image-2"];
+let customImageModelsLoaded = false;
+let customImageDefaultModel = "";
 
 function selectedCustomGenValue(groupId, key, fallback) {
   const btn = document.querySelector(`#${groupId} .cg-size-btn.active`);
@@ -4236,6 +4589,140 @@ function getCustomGenSize() {
 
 function getCustomShotType() {
   return selectedCustomGenValue("cgShotGroup", "shot", "selfie");
+}
+
+function normalizeCustomImageModel(value) {
+  const model = String(value || "").trim();
+  if (!model || ["default", "auto", "current"].includes(model.toLowerCase())) return "";
+  return model;
+}
+
+function getCustomImageModel() {
+  const select = document.getElementById("cgModelSelect");
+  return normalizeCustomImageModel(select ? select.value : "");
+}
+
+function getCustomPureMode() {
+  const btn = document.getElementById("cgPureBtn");
+  return !!(btn && btn.classList.contains("active"));
+}
+
+function setCustomPureMode(enabled) {
+  const btn = document.getElementById("cgPureBtn");
+  if (!btn) return;
+  btn.classList.toggle("active", !!enabled);
+  btn.setAttribute("aria-pressed", enabled ? "true" : "false");
+}
+
+function toggleCustomPureMode() {
+  setCustomPureMode(!getCustomPureMode());
+  saveCustomGenState();
+}
+
+function setCustomGenActiveValue(groupId, key, value) {
+  const group = document.getElementById(groupId);
+  if (!group || !value) return;
+  const btn = Array.from(group.querySelectorAll(".cg-size-btn"))
+    .find(item => item.dataset[key] === value);
+  if (!btn) return;
+  group.querySelectorAll(".cg-size-btn").forEach(item => item.classList.remove("active"));
+  btn.classList.add("active");
+}
+
+function setCustomImageModel(value) {
+  const select = document.getElementById("cgModelSelect");
+  if (!select) return;
+  const model = normalizeCustomImageModel(value);
+  if (model && !Array.from(select.options).some(opt => opt.value === model)) {
+    const opt = document.createElement("option");
+    opt.value = model;
+    opt.textContent = model;
+    select.appendChild(opt);
+  }
+  select.value = model;
+  updateCustomModelHint();
+}
+
+function updateCustomModelHint() {
+  const hint = document.getElementById("cgModelHint");
+  if (!hint) return;
+  const selected = getCustomImageModel();
+  hint.textContent = selected || (customImageDefaultModel ? `默认：${customImageDefaultModel}` : "默认模型");
+}
+
+function renderCustomImageModels(models, currentModel, defaultModel) {
+  const select = document.getElementById("cgModelSelect");
+  if (!select) return;
+  const savedModel = normalizeCustomImageModel(readCustomGenState().model || select.value);
+  customImageDefaultModel = normalizeCustomImageModel(defaultModel || currentModel || customImageDefaultModel);
+  const ordered = [];
+  [currentModel, defaultModel, ...CUSTOM_IMAGE_MODEL_FALLBACKS, ...(Array.isArray(models) ? models : [])].forEach(model => {
+    model = normalizeCustomImageModel(model);
+    if (model && !ordered.includes(model)) ordered.push(model);
+  });
+  select.innerHTML = "";
+  const defaultOpt = document.createElement("option");
+  defaultOpt.value = "";
+  defaultOpt.textContent = customImageDefaultModel ? `默认模型（${customImageDefaultModel}）` : "默认模型";
+  select.appendChild(defaultOpt);
+  ordered.forEach(model => {
+    const opt = document.createElement("option");
+    opt.value = model;
+    opt.textContent = model;
+    select.appendChild(opt);
+  });
+  setCustomImageModel(savedModel);
+}
+
+async function loadCustomImageModels() {
+  const select = document.getElementById("cgModelSelect");
+  if (!select) return;
+  if (!customImageModelsLoaded) {
+    renderCustomImageModels(CUSTOM_IMAGE_MODEL_FALLBACKS, "", "");
+  }
+  try {
+    const res = await fetch(`${API}/api/image-models`);
+    const data = await res.json();
+    renderCustomImageModels(data.models || [], data.current_model || "", data.default_model || "");
+    customImageModelsLoaded = true;
+  } catch(e) {
+    console.error("load image models:", e);
+    renderCustomImageModels(CUSTOM_IMAGE_MODEL_FALLBACKS, customImageDefaultModel, customImageDefaultModel);
+  }
+}
+
+function readCustomGenState() {
+  try {
+    return JSON.parse(window.galleryStorageGet("custom_gen_state", "{}")) || {};
+  } catch (e) {
+    return {};
+  }
+}
+
+function saveCustomGenState() {
+  const promptEl = document.getElementById("cgPrompt");
+  const state = {
+    prompt: promptEl ? promptEl.value : "",
+    aspect: getCustomGenSize().aspect,
+    resolution: getCustomGenSize().resolution,
+    shot: getCustomShotType(),
+    model: getCustomImageModel(),
+    pure: getCustomPureMode(),
+    ref: (document.querySelector("#cgRefGrid .cg-ref-item.active") || {}).dataset?.ref || ""
+  };
+  window.galleryStorageSet("custom_gen_state", JSON.stringify(state));
+}
+
+function restoreCustomGenState() {
+  const state = readCustomGenState();
+  const promptEl = document.getElementById("cgPrompt");
+  if (promptEl && typeof state.prompt === "string") promptEl.value = state.prompt;
+  setCustomGenActiveValue("cgAspectGroup", "aspect", state.aspect);
+  setCustomGenActiveValue("cgResolutionGroup", "resolution", state.resolution);
+  setCustomGenActiveValue("cgShotGroup", "shot", state.shot);
+  setCustomImageModel(state.model);
+  setCustomPureMode(state.pure === true || state.pure === 1 || String(state.pure || "").toLowerCase() === "true" || state.pure === "1");
+  updateCustomSizeHint();
 }
 
 function updateCustomSizeHint() {
@@ -4254,17 +4741,52 @@ function bindCustomGenOptionGroup(groupId) {
     group.querySelectorAll(".cg-size-btn").forEach(b => b.classList.remove("active"));
     btn.classList.add("active");
     updateCustomSizeHint();
+    saveCustomGenState();
   });
 }
 
+function restoreCustomRefSelection(grid, refValue) {
+  if (!grid) return;
+  const items = Array.from(grid.querySelectorAll(".cg-ref-item"));
+  const target = items.find(item => item.dataset.ref === refValue) || items[0];
+  if (!target) return;
+  items.forEach(item => item.classList.remove("active"));
+  target.classList.add("active");
+}
+
+function currentCustomGenPayload(refImageOverride = "") {
+  const promptEl = document.getElementById("cgPrompt");
+  const prompt = promptEl ? promptEl.value.trim() : "";
+  if (!prompt) return { error: "prompt_required" };
+  const customSize = getCustomGenSize();
+  const refItem = document.querySelector("#cgRefGrid .cg-ref-item.active");
+  const refImage = refImageOverride || (refItem ? refItem.dataset.ref : "");
+  const body = {
+    prompt,
+    aspect: customSize.aspect,
+    resolution: customSize.resolution,
+    size: customSize.size,
+    shot_type: getCustomShotType(),
+    pure: getCustomPureMode(),
+    source: "custom_ui"
+  };
+  const imageModel = getCustomImageModel();
+  if (imageModel) body.model = imageModel;
+  if (refImage) body.ref_image = refImage;
+  return { body };
+}
+
 function openCustomGen() {
+  restoreCustomGenState();
   document.getElementById("cgOverlay").classList.add("open");
   document.body.style.overflow = "hidden";
   updateCustomSizeHint();
+  loadCustomImageModels();
   // Load gallery images as reference options
   loadRefImages();
 }
 function closeCustomGen() {
+  saveCustomGenState();
   document.getElementById("cgOverlay").classList.remove("open");
   document.body.style.overflow = "";
 }
@@ -4272,6 +4794,14 @@ document.addEventListener("DOMContentLoaded", () => {
   bindCustomGenOptionGroup("cgAspectGroup");
   bindCustomGenOptionGroup("cgResolutionGroup");
   bindCustomGenOptionGroup("cgShotGroup");
+  const modelEl = document.getElementById("cgModelSelect");
+  if (modelEl) modelEl.addEventListener("change", () => {
+    updateCustomModelHint();
+    saveCustomGenState();
+  });
+  const promptEl = document.getElementById("cgPrompt");
+  if (promptEl) promptEl.addEventListener("input", saveCustomGenState);
+  restoreCustomGenState();
   updateCustomSizeHint();
 });
 // Reference image selector
@@ -4289,6 +4819,7 @@ function bindReferenceGridSelection(grid) {
     item.addEventListener("click", () => {
       grid.querySelectorAll(".cg-ref-item").forEach(x => x.classList.remove("active"));
       item.classList.add("active");
+      saveCustomGenState();
     });
   });
 }
@@ -4320,6 +4851,7 @@ function renderRefImages(builtinRefs, uploadRefs) {
   }
 
   grid.innerHTML = html;
+  restoreCustomRefSelection(grid, readCustomGenState().ref || "");
   bindReferenceGridSelection(grid);
 }
 async function loadRefImages() {
@@ -4380,41 +4912,69 @@ function deleteUploadedRef(idx) {
     });
 }
 async function submitCustomGen() {
-  const prompt = document.getElementById("cgPrompt").value.trim();
-  if (!prompt) { showToast("✍️ 先输入穿搭描述呀～"); return; }
-  const customSize = getCustomGenSize();
-  const shotType = getCustomShotType();
-  const refItem = document.querySelector("#cgRefGrid .cg-ref-item.active");
-  const refImage = refItem ? refItem.dataset.ref : "";
+  const payload = currentCustomGenPayload();
+  if (payload.error === "prompt_required") { showToast("✍️ 先输入穿搭描述呀～"); return; }
   
   const btn = document.getElementById("cgSubmitBtn");
   btn.disabled = true; btn.textContent = "⏳ 正在打扮...";
   showToast("🌸 按你的描述开始生成～");
   
   try {
-    const body = {
-      prompt,
-      aspect: customSize.aspect,
-      resolution: customSize.resolution,
-      size: customSize.size,
-      shot_type: shotType
-    };
-    if (refImage) body.ref_image = refImage;
     const res = await fetch(`${API}/api/generate-custom`, {
       method: "POST",
       headers: {"Content-Type": "application/json"},
-      body: JSON.stringify(body)
+      body: JSON.stringify(payload.body)
     });
     const data = await res.json();
     if (data.error) showToast("❌ " + data.error);
     else {
       showToast("✨ 定制造型生成完成啦！");
       closeCustomGen();
-      document.getElementById("cgPrompt").value = "";
       await loadGallery();
     }
   } catch(e) { showToast("❌ " + e.message); }
   finally { btn.disabled = false; btn.textContent = "✨ 开始生成"; }
+}
+
+async function quickCustomImg2ImgFromModal(event, btn) {
+  if (event) event.stopPropagation();
+  if (!currentModalImg) {
+    showToast("❌ 找不到当前图片");
+    return;
+  }
+  const payload = currentCustomGenPayload(`/images/${currentModalImg}`);
+  if (payload.error === "prompt_required") {
+    showToast("✍️ 先在穿搭生成里填好提示词");
+    return;
+  }
+  if (btn && btn.disabled) return;
+  if (btn) {
+    btn.disabled = true;
+    btn.classList.add("loading");
+  }
+  showToast("🪄 正在用当前图做参考生成～");
+  try {
+    const res = await fetch(`${API}/api/generate-custom`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify(payload.body)
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || data.error) {
+      showToast("❌ " + (data.error || `HTTP ${res.status}`));
+      return;
+    }
+    showToast("✨ 魔法棒图生图完成");
+    closeModal();
+    await loadGallery();
+  } catch(e) {
+    showToast("❌ " + e.message);
+  } finally {
+    if (btn) {
+      btn.disabled = false;
+      btn.classList.remove("loading");
+    }
+  }
 }
 
 // ===== Load =====
@@ -4734,11 +5294,15 @@ async function loadSettingsStatus() {
 
     // Update status indicators
     updateStatus("skGiteeStatus", data.gitee_key);
-    updateStatus("skGptStatus", data.gpt_key);
     updateStatus("skCpaKeyStatus", data.cpa_key);
     const gptBaseUrlEl = document.getElementById("skGptBaseUrl");
     const gptBaseUrlStatus = document.getElementById("skGptBaseUrlStatus");
-    gptBaseUrlEl.value = data.gpt_base_url_local || data.gpt_base_url || "";
+    gptBaseUrlEl.value = data.gpt_base_url_local || "";
+    gptBaseUrlEl.dataset.localValue = data.gpt_base_url_local || "";
+    gptBaseUrlEl.dataset.defaultValue = data.gpt_base_url_default || "";
+    gptBaseUrlEl.placeholder = data.gpt_base_url_default
+      ? `默认：${data.gpt_base_url_default}`
+      : "例如 http://127.0.0.1:8090/v1/images/generations";
     if (data.gpt_base_url_local) {
       gptBaseUrlStatus.textContent = "✓ 本机已设置";
       gptBaseUrlStatus.className = "sk-status set";
@@ -4749,9 +5313,23 @@ async function loadSettingsStatus() {
       gptBaseUrlStatus.textContent = "○ 未设置";
       gptBaseUrlStatus.className = "sk-status unset";
     }
+    const gptStatus = document.getElementById("skGptStatus");
+    if (data.gpt_key) {
+      updateStatus("skGptStatus", data.gpt_key);
+    } else if (data.gpt_base_url) {
+      gptStatus.textContent = "○ 未设置（免密端点可留空）";
+      gptStatus.className = "sk-status unset";
+    } else {
+      updateStatus("skGptStatus", data.gpt_key);
+    }
     const cpaUrlEl = document.getElementById("skCpaUrl");
     const cpaUrlStatus = document.getElementById("skCpaUrlStatus");
-    cpaUrlEl.value = data.cpa_url_local || data.cpa_url || "";
+    cpaUrlEl.value = data.cpa_url_local || "";
+    cpaUrlEl.dataset.localValue = data.cpa_url_local || "";
+    cpaUrlEl.dataset.defaultValue = data.cpa_url_default || "";
+    cpaUrlEl.placeholder = data.cpa_url_default
+      ? `默认：${data.cpa_url_default}`
+      : "例如 http://127.0.0.1:8090/v1";
     if (data.cpa_url_local) {
       cpaUrlStatus.textContent = "✓ 本机已设置";
       cpaUrlStatus.className = "sk-status set";
@@ -4959,8 +5537,10 @@ window.runImageCleanup = runImageCleanup;
 async function saveSettings() {
   const giteeKey = document.getElementById("skGiteeKey").value.trim();
   const gptKey = document.getElementById("skGptKey").value.trim();
-  const gptBaseUrl = document.getElementById("skGptBaseUrl").value.trim();
-  const cpaUrl = document.getElementById("skCpaUrl").value.trim();
+  const gptBaseUrlEl = document.getElementById("skGptBaseUrl");
+  const cpaUrlEl = document.getElementById("skCpaUrl");
+  const gptBaseUrl = gptBaseUrlEl.value.trim();
+  const cpaUrl = cpaUrlEl.value.trim();
   const cpaKey = document.getElementById("skCpaKey").value.trim();
   const githubProxy = document.getElementById("skGithubProxy").value.trim();
   const imageDir = document.getElementById("skImageDir").value.trim();
@@ -4979,8 +5559,8 @@ async function saveSettings() {
     const body = {};
     if (giteeKey) body.gitee_key = giteeKey;
     if (gptKey) body.gpt_key = gptKey;
-    body.gpt_base_url = gptBaseUrl;
-    body.cpa_url = cpaUrl;
+    if (gptBaseUrl || gptBaseUrlEl.dataset.localValue) body.gpt_base_url = gptBaseUrl;
+    if (cpaUrl || cpaUrlEl.dataset.localValue) body.cpa_url = cpaUrl;
     if (cpaKey) body.cpa_key = cpaKey;
     body.github_proxy = githubProxy;
     body.image_dir = imageDir;
@@ -5054,7 +5634,7 @@ async function checkUpdate() {
         <div class="sk-update-card">
           <div style="font-weight:600;color:#2e7d32;margin-bottom:8px;">🎉 发现新版本 v${data.latest}</div>
           <div style="font-size:13px;color:#555;margin-bottom:10px;">${data.changelog || '更新内容详见 GitHub'}</div>
-          <div class="sk-update-safe-note">只更新仓库代码；本地 API Key、Base URL、appearance、画廊图片和参考图会保留。</div>
+          <div class="sk-update-safe-note">只更新仓库代码；本地 API Key、Base URL、appearance、画廊图片和参考图会保留。Hermes 可调用 /api/hermes/update 自动安全升级。</div>
           ${data.html_url ? `<a href="${data.html_url}" target="_blank" style="font-size:12px;color:#1976d2;">查看完整更新日志</a><br>` : ''}
           <button class="sk-update-action" id="applyUpdateBtn" onclick="applyUpdate()">⬆️ 一键安全升级到 v${data.latest}</button>
         </div>`;
@@ -5118,9 +5698,17 @@ document.addEventListener("keydown", e => {
 });
 </script>
 <!-- Column Slider -->
+<div id="galleryScrollNav" class="hidden" aria-label="画廊快速滚动">
+  <button type="button" class="scroll-nav-btn" onclick="scrollGalleryEdge('top')" title="回到顶部" aria-label="回到顶部">
+    <i class="fa-solid fa-arrow-up" aria-hidden="true"></i>
+  </button>
+  <button type="button" class="scroll-nav-btn" onclick="scrollGalleryEdge('bottom')" title="到底部" aria-label="到底部">
+    <i class="fa-solid fa-arrow-down" aria-hidden="true"></i>
+  </button>
+</div>
 <div id="colSliderWrap" class="hidden">
   <span class="col-icon">🖼️</span>
-  <input type="range" id="colSlider" min="4" max="8" step="1" value="5">
+  <input type="range" id="colSlider" min="1" max="8" step="1" value="5">
   <span class="col-val" id="colVal">5</span>
 </div>
 
@@ -5130,17 +5718,36 @@ document.addEventListener("keydown", e => {
   const slider = document.getElementById('colSlider');
   const valEl = document.getElementById('colVal');
   const wrap = document.getElementById('colSliderWrap');
+  const scrollNav = document.getElementById('galleryScrollNav');
   const saved = window.galleryStorageGet('gallery_cols', '');
 
-  const COL_MIN = 4;
+  const COL_MIN = 1;
+  const DESKTOP_COL_MIN = 4;
   const COL_MAX = 8;
   const MIN_CARD_WIDTH = 164;
   let preferredCols = Math.max(COL_MIN, Math.min(COL_MAX, parseInt(saved || slider.value, 10) || 5));
+
+  window.scrollGalleryEdge = function(edge) {
+    const root = document.scrollingElement || document.documentElement;
+    const maxTop = Math.max(0, root.scrollHeight - window.innerHeight);
+    window.scrollTo({ top: edge === 'bottom' ? maxTop : 0, behavior: 'smooth' });
+  };
+
+  function setFloatToolsVisible(visible) {
+    wrap.classList.toggle('hidden', !visible);
+    if (scrollNav) scrollNav.classList.toggle('hidden', !visible);
+  }
 
   function maxColumnCount(grid) {
     const width = grid.clientWidth || grid.getBoundingClientRect().width || window.innerWidth;
     const gap = parseFloat(getComputedStyle(grid).columnGap || "12") || 12;
     return Math.max(COL_MIN, Math.min(COL_MAX, Math.floor((width + gap) / (MIN_CARD_WIDTH + gap))));
+  }
+
+  function minColumnCount(maxAvailable) {
+    return window.matchMedia("(max-width: 700px)").matches
+      ? COL_MIN
+      : Math.min(DESKTOP_COL_MIN, maxAvailable);
   }
 
   function currentMaxColumns() {
@@ -5150,15 +5757,16 @@ document.addEventListener("keydown", e => {
   }
 
   function syncSlider(actual, maxAvailable) {
-    slider.min = String(COL_MIN);
+    const minAvailable = minColumnCount(maxAvailable);
+    slider.min = String(minAvailable);
     slider.max = String(maxAvailable);
     slider.value = String(actual);
-    slider.disabled = maxAvailable <= COL_MIN;
-    wrap.classList.toggle('single-value', maxAvailable <= COL_MIN);
+    slider.disabled = maxAvailable <= minAvailable;
+    wrap.classList.toggle('single-value', maxAvailable <= minAvailable);
     valEl.textContent = String(actual);
     const title = maxAvailable < COL_MAX
       ? `当前宽度最多 ${maxAvailable} 列，放宽窗口可调到 ${COL_MAX} 列`
-      : `可调 ${COL_MIN}-${COL_MAX} 列`;
+      : `可调 ${minAvailable}-${COL_MAX} 列`;
     slider.title = title;
     valEl.title = title;
     wrap.title = title;
@@ -5167,7 +5775,8 @@ document.addEventListener("keydown", e => {
   function applyCols(n, persist = true) {
     preferredCols = Math.max(COL_MIN, Math.min(COL_MAX, parseInt(n, 10) || preferredCols || 5));
     const maxAvailable = currentMaxColumns();
-    const actual = Math.min(preferredCols, maxAvailable);
+    const minAvailable = minColumnCount(maxAvailable);
+    const actual = Math.max(minAvailable, Math.min(preferredCols, maxAvailable));
     document.querySelectorAll('.gallery-grid').forEach(g => {
       g.style.gridTemplateColumns = `repeat(${actual}, minmax(0, 1fr))`;
       // Remove old cols-N classes and add new one
@@ -5198,11 +5807,11 @@ document.addEventListener("keydown", e => {
   window.switchTab = function(tab) {
     origSwitchTab(tab);
     if (tab === 'gallery' || tab === 'favorites') {
-      wrap.classList.remove('hidden');
+      setFloatToolsVisible(true);
       // Re-apply columns after render
       requestAnimationFrame(() => applyCols(preferredCols, false));
     } else {
-      wrap.classList.add('hidden');
+      setFloatToolsVisible(false);
     }
   };
 
@@ -5210,7 +5819,7 @@ document.addEventListener("keydown", e => {
   document.addEventListener('DOMContentLoaded', () => {
     const activeTab = document.querySelector('.tab.active');
     if (activeTab && (activeTab.dataset.tab === 'gallery' || activeTab.dataset.tab === 'favorites')) {
-      wrap.classList.remove('hidden');
+      setFloatToolsVisible(true);
       applyCols(preferredCols, false);
     }
   });
@@ -5304,6 +5913,7 @@ function loadScheduleEggData(options) {
     var activeToday = Math.max(0, parseInt((jobsData && jobsData.active_today) || 0, 10) || 0);
     var failedToday = Math.max(0, parseInt((jobsData && jobsData.failed_today) || 0, 10) || 0);
     var plannedToday = Math.max(completedToday + activeToday + failedToday, parseInt((jobsData && jobsData.planned_today) || 0, 10) || 0);
+    var remainingToday = Math.max(0, parseInt((jobsData && jobsData.remaining_today) || (maxDaily - plannedToday), 10) || 0);
 
     if (!detail || (detail.status !== 'ok' && detail.status !== 'no_schedule')) {
       body.innerHTML = '<div class="egg-empty"><div class="icon">😴</div><p>今天还没有生成日程哦～<br>每天早上 7 点自动生成！</p></div>';
@@ -5367,10 +5977,11 @@ function loadScheduleEggData(options) {
       }
     }
 
-    // 过滤：显示已完成/已过日程 + 下一条未来计划
+    // 过滤：今日日程只预览已完成/当前项 + 未来一条；完整队列在“今日生图计划”里展示。
     var visibleSchedule = [];
-    var lastPastIdx = -1;
-    var nextFutureIdx = -1;
+    var activeScheduleIdx = -1;
+    var nextFutureCandidate = null;
+    var shownFutureSchedule = false;
     for (var i = 0; i < schedule.length; i++) {
       var normalizedTime = extractJobTime(schedule[i].time);
       if (!normalizedTime) continue;
@@ -5380,24 +5991,38 @@ function loadScheduleEggData(options) {
         hasPhoto: !!photoTimeMap[normalizedTime],
         hasJob: !!jobTimeMap[normalizedTime],
       };
+      if (!normalizedItem.hasPhoto && !normalizedItem.hasJob) continue;
       var itemPast = isPastOrNow(normalizedTime);
-      
-      if (itemPast || normalizedItem.hasPhoto) {
-        // 已完成/已过时段：显示为完成态，不再拿最后一条已过日程冒充当前项。
-        normalizedItem.isPast = true;
-        normalizedItem.isNext = false;
-        visibleSchedule.push(normalizedItem);
-        lastPastIdx = visibleSchedule.length - 1;
-      } else if (nextFutureIdx < 0) {
-        // 下一条未来计划：显示为高亮预告。
-        normalizedItem.isPast = false;
-        normalizedItem.isNext = true;
-        visibleSchedule.push(normalizedItem);
-        nextFutureIdx = visibleSchedule.length - 1;
+      normalizedItem.isPast = itemPast || normalizedItem.hasPhoto;
+      normalizedItem.isNext = !normalizedItem.isPast;
+      if (normalizedItem.isNext) {
+        if (shownFutureSchedule) continue;
+        shownFutureSchedule = true;
       }
-      // 其他未来计划：不显示
+      visibleSchedule.push(normalizedItem);
+      if (activeScheduleIdx < 0 && normalizedItem.isNext) activeScheduleIdx = visibleSchedule.length - 1;
     }
-    var activeScheduleIdx = nextFutureIdx;
+    if (!shownFutureSchedule && remainingToday > 0 && activeToday === 0) {
+      for (var nf = 0; nf < schedule.length; nf++) {
+        var futureTime = extractJobTime(schedule[nf].time);
+        if (!futureTime || isPastOrNow(futureTime) || photoTimeMap[futureTime] || jobTimeMap[futureTime]) continue;
+        nextFutureCandidate = {
+          time: futureTime,
+          activity: schedule[nf].activity || '',
+          hasPhoto: false,
+          hasJob: false,
+          isPast: false,
+          isNext: true,
+        };
+        break;
+      }
+      if (nextFutureCandidate) {
+        visibleSchedule.push(nextFutureCandidate);
+        visibleSchedule.sort(function(a, b) { return timeSortValue(a.time) - timeSortValue(b.time); });
+        activeScheduleIdx = visibleSchedule.indexOf(nextFutureCandidate);
+        shownFutureSchedule = true;
+      }
+    }
 
     if (visibleSchedule.length > 0) {
       html += '<div class="egg-section"><div class="egg-section-title"><span class="icon">📅</span>今日日程</div>';
@@ -5416,10 +6041,10 @@ function loadScheduleEggData(options) {
       html += '</div></div>';
     } else {
       html += '<div class="egg-section"><div class="egg-section-title"><span class="icon">📅</span>今日日程</div>';
-      html += '<div class="egg-empty" style="padding:20px 0;font-size:13px;color:#aaa;">还没有已完成的日程哦～</div></div>';
+      html += '<div class="egg-empty" style="padding:20px 0;font-size:13px;color:#aaa;">还没有生图计划日程哦～</div></div>';
     }
 
-    // 生图计划：待执行项来自真实 job，完成项来自图片记录，当前错过项来自日程。
+    // 生图计划：待执行项来自真实 job，完成项来自图片记录。
     var planItems = [];
     var planSeen = {};
     for (var ji = 0; ji < jobs.length; ji++) {
@@ -5448,19 +6073,6 @@ function loadScheduleEggData(options) {
         status: 'done',
         photo: photo,
       });
-    }
-    if (lastPastIdx >= 0) {
-      var currentItem = visibleSchedule[lastPastIdx];
-      if (currentItem && !currentItem.hasPhoto && !currentItem.hasJob && !planSeen[currentItem.time]) {
-        planSeen[currentItem.time] = true;
-        planItems.push({
-          time: currentItem.time,
-          activity: currentItem.activity,
-          theme: inferTheme(currentItem.time),
-          status: 'skipped',
-          scheduleOnly: true,
-        });
-      }
     }
     planItems.sort(function(a, b) { return timeSortValue(a.time) - timeSortValue(b.time); });
 
@@ -5528,21 +6140,27 @@ function loadScheduleEggData(options) {
     var hasOutfit = outfitKeys.some(function(k){ return outfit[k]; });
     if (hasOutfit) {
       var outfitFavorite = detail.outfit_favorite === true;
+      var outfitDisliked = detail.outfit_disliked === true;
       var favoriteOutfit = {};
       ['风格', '发型', '穿搭'].forEach(function(k) {
         if (outfit[k]) favoriteOutfit[k] = outfit[k];
       });
-      var outfitPayload = {
-        id: detail.outfit_favorite_id || '',
+      var outfitBasePayload = {
+        id: detail.outfit_favorite_id || detail.outfit_disliked_id || '',
         date: detail.date || '',
         outfit_style: detail.outfit_style || outfit['风格'] || '',
         base_style: detail.base_style || '',
         outfit: favoriteOutfit,
-        outfit_keywords: detail.outfit_keywords || '',
-        favorite: !outfitFavorite
+        outfit_keywords: detail.outfit_keywords || ''
       };
-      var outfitPayloadAttr = escapeAttr(encodeURIComponent(JSON.stringify(outfitPayload)));
-      html += '<div class="egg-section egg-outfit-section"><div class="egg-section-title with-action"><span class="egg-section-title-main"><span class="icon">👗</span>今日穿搭方案</span><span class="egg-title-actions"><button class="egg-outfit-fav-btn ' + (outfitFavorite ? 'active' : '') + '" type="button" data-payload="' + outfitPayloadAttr + '" onclick="toggleFavoriteOutfitPlan(this)" aria-label="' + (outfitFavorite ? '取消收藏这套穿搭方案' : '收藏这套穿搭方案') + '" title="' + (outfitFavorite ? '取消收藏这套穿搭方案' : '收藏这套穿搭方案') + '"><i class="' + (outfitFavorite ? 'fa-solid' : 'fa-regular') + ' fa-bookmark" aria-hidden="true"></i><span>' + (outfitFavorite ? '已收藏' : '收藏方案') + '</span></button><button class="egg-outfit-view-btn" type="button" onclick="toggleFavoriteOutfitPanel(this)" aria-expanded="false" aria-controls="eggFavoriteOutfitsOverlay" aria-label="查看收藏方案" title="查看收藏方案"><i class="fa-regular fa-folder-open" aria-hidden="true"></i><span>查看</span></button></span></div>';
+      var favoritePayload = Object.assign({}, outfitBasePayload, { favorite: !outfitFavorite });
+      var dislikedPayload = Object.assign({}, outfitBasePayload, { disliked: !outfitDisliked });
+      var outfitPayloadAttr = escapeAttr(encodeURIComponent(JSON.stringify(favoritePayload)));
+      var dislikedPayloadAttr = escapeAttr(encodeURIComponent(JSON.stringify(dislikedPayload)));
+      html += '<div class="egg-section egg-outfit-section"><div class="egg-section-title with-action"><span class="egg-section-title-main"><span class="icon">👗</span>今日穿搭方案</span><span class="egg-title-actions">';
+      html += '<button class="egg-outfit-fav-btn ' + (outfitFavorite ? 'active' : '') + '" type="button" data-payload="' + outfitPayloadAttr + '" onclick="toggleFavoriteOutfitPlan(this)" aria-label="' + (outfitFavorite ? '取消收藏这套穿搭方案' : '收藏这套穿搭方案') + '" title="' + (outfitFavorite ? '取消收藏这套穿搭方案' : '收藏这套穿搭方案') + '"><i class="' + (outfitFavorite ? 'fa-solid' : 'fa-regular') + ' fa-bookmark" aria-hidden="true"></i><span>' + (outfitFavorite ? '已收藏' : '收藏方案') + '</span></button>';
+      html += '<button class="egg-outfit-dislike-btn ' + (outfitDisliked ? 'active' : '') + '" type="button" data-payload="' + dislikedPayloadAttr + '" onclick="toggleDislikedOutfitPlan(this)" aria-label="' + (outfitDisliked ? '取消减少这类穿搭' : '减少这类穿搭') + '" title="' + (outfitDisliked ? '取消减少这类穿搭' : '减少这类穿搭') + '"><i class="' + (outfitDisliked ? 'fa-solid' : 'fa-regular') + ' fa-thumbs-down" aria-hidden="true"></i><span>' + (outfitDisliked ? '已减少' : '不喜欢') + '</span></button>';
+      html += '<button class="egg-outfit-view-btn" type="button" onclick="toggleFavoriteOutfitPanel(this)" aria-expanded="false" aria-controls="eggFavoriteOutfitsOverlay" aria-label="查看收藏方案" title="查看收藏方案"><i class="fa-regular fa-folder-open" aria-hidden="true"></i><span>查看</span></button></span></div>';
       html += '<div class="egg-outfit-grid">';
       for (var m = 0; m < outfitKeys.length; m++) {
         if (outfit[outfitKeys[m]]) {
@@ -5602,6 +6220,9 @@ function toggleFavoriteOutfitPlan(btn) {
   }).then(function(data) {
     showToast(data.favorite ? '已收藏这套穿搭方案' : '已取消收藏穿搭方案');
     setFavoriteOutfitButtonState(btn, data.favorite, data.id);
+    if (data.disliked_removed) {
+      setDislikedOutfitButtonState(document.querySelector('.egg-outfit-dislike-btn'), false, data.id);
+    }
     scheduleEggCache = { html: '', dateText: '', updatedAt: 0 };
     var overlay = document.getElementById('eggFavoriteOutfitsOverlay');
     var body = document.getElementById('eggFavoriteOutfitsBody');
@@ -5610,6 +6231,47 @@ function toggleFavoriteOutfitPlan(btn) {
     }
   }).catch(function(e) {
     showToast('收藏方案失败：' + (e && e.message ? e.message : '未知错误'));
+  }).finally(function() {
+    btn.disabled = false;
+  });
+}
+
+function toggleDislikedOutfitPlan(btn) {
+  if (!btn || btn.disabled) return;
+  var payload = readFavoriteOutfitPayload(btn);
+  if (!payload) {
+    showToast('标记不喜欢失败：数据不完整');
+    return;
+  }
+  if (!payload || !payload.outfit) {
+    showToast('标记不喜欢失败：缺少穿搭数据');
+    return;
+  }
+
+  btn.disabled = true;
+  fetch('/api/disliked-outfits' + apiKeyQuery(), {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload)
+  }).then(function(r) {
+    return r.json().then(function(data) {
+      if (!r.ok || data.error) throw new Error(data.error || 'dislike_failed');
+      return data;
+    });
+  }).then(function(data) {
+    showToast(data.disliked ? '以后会减少这类穿搭' : '已取消减少这类穿搭');
+    setDislikedOutfitButtonState(btn, data.disliked, data.id);
+    if (data.favorite_removed) {
+      setFavoriteOutfitButtonState(document.querySelector('.egg-outfit-fav-btn'), false, data.id);
+      var overlay = document.getElementById('eggFavoriteOutfitsOverlay');
+      var body = document.getElementById('eggFavoriteOutfitsBody');
+      if (overlay && overlay.classList.contains('show') && body) {
+        loadFavoriteOutfitPanel(body);
+      }
+    }
+    scheduleEggCache = { html: '', dateText: '', updatedAt: 0 };
+  }).catch(function(e) {
+    showToast('标记不喜欢失败：' + (e && e.message ? e.message : '未知错误'));
   }).finally(function() {
     btn.disabled = false;
   });
@@ -5666,6 +6328,24 @@ function setFavoriteOutfitButtonState(btn, isFavorite, favoriteId) {
   }
   var label = btn.querySelector('span');
   if (label) label.textContent = isFavorite ? '已收藏' : '收藏方案';
+}
+
+function setDislikedOutfitButtonState(btn, isDisliked, dislikedId) {
+  if (!btn) return;
+  var payload = readFavoriteOutfitPayload(btn) || {};
+  payload.disliked = !isDisliked;
+  if (dislikedId) payload.id = dislikedId;
+  btn.dataset.payload = encodeFavoriteOutfitPayload(payload);
+  btn.classList.toggle('active', !!isDisliked);
+  btn.setAttribute('aria-label', isDisliked ? '取消减少这类穿搭' : '减少这类穿搭');
+  btn.setAttribute('title', isDisliked ? '取消减少这类穿搭' : '减少这类穿搭');
+  var icon = btn.querySelector('i');
+  if (icon) {
+    icon.classList.toggle('fa-solid', !!isDisliked);
+    icon.classList.toggle('fa-regular', !isDisliked);
+  }
+  var label = btn.querySelector('span');
+  if (label) label.textContent = isDisliked ? '已减少' : '不喜欢';
 }
 
 function syncCurrentFavoriteButtonAfterRemoval(favoriteId) {

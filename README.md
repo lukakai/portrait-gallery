@@ -1,6 +1,6 @@
 # 🎀 Portrait Gallery
 
-当前版本：**v1.1.6**
+当前版本：**v1.1.8**
 
 > AI 穿搭生图 & 个人画廊系统 —— 让 AI 每天为你量身定制穿搭方案并自动生成写真
 
@@ -215,6 +215,27 @@ curl -X POST http://localhost:18889/api/generate-custom \
 
 **theme 可选值**：`morning` / `noon` / `evening` / `bedtime` / `sexy` / `custom`
 
+### Hermes 安全升级 API
+
+Hermes 可以直接调用下面的接口完成检查和一键升级；升级只更新仓库代码，会跳过本地密钥、配置、画廊图片、参考图和运行时数据。
+
+```bash
+# 检查最新版本
+curl http://localhost:18889/api/hermes/check-update
+
+# 预览本次会更新/跳过哪些文件，不重启
+curl -X POST http://localhost:18889/api/hermes/update \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": true}'
+
+# 执行安全升级，成功后服务自动重启
+curl -X POST http://localhost:18889/api/hermes/update \
+  -H "Content-Type: application/json" \
+  -d '{"dry_run": false, "restart": true}'
+```
+
+受保护路径包括：`.env`、`config/config.yaml`、`config/local.yaml`、`docker-compose.override.yml`、`data/`、`app/data/`、`logs/`、`app/references/uploads/`。
+
 ### 图片管理
 
 ```bash
@@ -255,6 +276,10 @@ curl -H "X-API-Key: $GALLERY_API_KEY" http://localhost:18889/api/gallery
 curl "http://localhost:18889/api/gallery?key=$GALLERY_API_KEY"
 ```
 
+### Hermes 生图文案
+
+Hermes 调用 `/api/generate-custom`、`/api/hermes/text-to-image` 或 `/api/hermes/image-to-image` 时，可在请求体传入 `caption`、`thought`、`small_thought`、`copy`、`copywriting` 或 `message`。画廊不会为 Hermes 图片另行生成小心思，会直接把该字段写入卡片 `caption` 并在画廊里展示。
+
 ## 📱 微信推送
 
 生图完成后自动通过 `hermes send --to weixin` 推送到微信：
@@ -272,6 +297,23 @@ curl "http://localhost:18889/api/gallery?key=$GALLERY_API_KEY"
 - **⚙️ 设置** — Web UI 管理 API 密钥
 
 ## 🧾 Release Notes
+
+### v1.1.8
+
+- 自定义穿搭生成新增模型选择，会从 GPT Image 与 CPA/AxonHub 的 `/models` 列表读取 Agnes、Grok、Gemini 等可用生图模型。
+- Hermes/API 生图链路优化：Hermes 传入的文案会直接写入画廊小心思，来源、文生图/图生图和视角信息展示更清晰。
+- 日程生图要求 LLM 输出每个时间段的动作、场景、服饰和发型明细，并加强时间约束，减少白天活动被生成成夜景的问题。
+- “现在在干嘛”和重抽链路改为更严格复用今日日程上下文，重抽会替换原卡片信息与图片，不再只换图或额外生成新卡。
+- 自定义自拍/半身/全身视角继续优化，横图也会保留人物完整构图和动作空间；手机端网格列数适配更灵活。
+- 新增 Hermes 安全升级 API，并加固远程写接口、参考图路径、Picxazz 同步默认值、Hermes 图片校验和元数据并发写入。
+
+### v1.1.7
+
+- 今日卡片和弹窗新增重抽入口，重抽会在原卡片上替换图片，不再额外插入新卡。
+- 生图计划和日程展示进一步对齐：只显示实际照片计划里的时间段，计划完成后不再追加未来项。
+- 优化“小心思”和 caption 口吻，减少照抄日程、重复“画廊现场感”等模板化文案。
+- 全部 Tab 支持双击切换“只看未收藏”，删除卡片后保持当前浏览位置，避免列表重绘时乱跳。
+- 画廊右下角新增回到顶部/底部快捷按钮，并优化列数滑块附近的浮动控件布局。
 
 ### v1.1.6
 
