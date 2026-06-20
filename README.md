@@ -1,6 +1,6 @@
 # 🎀 Portrait Gallery
 
-当前版本：**v1.1.8**
+当前版本：**v1.2.0**
 
 > AI 穿搭生图 & 个人画廊系统 —— 让 AI 每天为你量身定制穿搭方案并自动生成写真
 
@@ -10,7 +10,7 @@
 
 - 📅 **LLM 日程驱动** — DeepSeek 自动生成每日穿搭日程（HH:mm 精度），按时触发生图
 - 🎨 **多引擎生图** — 支持 OpenAI-compatible API (GPT Image / AxonHub / 自定义端点)、Gemini、Gitee z-image-turbo 可选回退（默认关闭）
-- 🖼️ **Web 画廊** — 今日/全部/收藏三 Tab，横版大卡 + 网格双布局
+- 🖼️ **Web 画廊** — 今日/全部/收藏/衣柜四 Tab，横版大卡 + 网格双布局
 - 🎀 **穿搭生成** — 自定义 prompt + 参考图 + 尺寸选择
 - ⏰ **动态调度** — LLM 日程驱动，根据 HH:mm 时间动态创建一次性生图任务
 - 🔧 **REST API** — 完整 CRUD 接口，支持集成到任何 AI Agent
@@ -97,9 +97,9 @@ python3 main.py
     <key>KeepAlive</key>
     <true/>
     <key>StandardOutPath</key>
-    <string>/path/to/portrait-gallery/logs/gallery.log</string>
+    <string>/path/to/portrait-gallery/logs/launcher.log</string>
     <key>StandardErrorPath</key>
-    <string>/path/to/portrait-gallery/logs/gallery.log</string>
+    <string>/path/to/portrait-gallery/logs/launcher.log</string>
 </dict>
 </plist>
 ```
@@ -119,6 +119,8 @@ launchctl start com.hermes.portrait-gallery
 # 查看日志
 tail -f /path/to/portrait-gallery/logs/gallery.log
 ```
+
+应用会追加写入 `logs/gallery.log`，重启不会覆盖；日志按天轮转，并自动清理 3 天前的轮转文件。`launcher.log` 只保留启动器自身输出，避免和应用日志重复写入。
 
 ## 📐 架构
 
@@ -293,10 +295,29 @@ Hermes 调用 `/api/generate-custom`、`/api/hermes/text-to-image` 或 `/api/her
 - **今日 Tab** — 横版大卡片，直接展示穿搭/日程/caption，点击图片全屏查看
 - **全部 Tab** — 6 列网格，点击弹窗查看详情（收藏/分享/删除）
 - **收藏 Tab** — 筛选已收藏图片
+- **衣柜 Tab** — 展示收藏穿搭方案和 GPT 生成的衣架参考图，支持编辑、重生和图生图引用
 - **🎀 穿搭生成** — 自定义 prompt + 参考图 + 尺寸选择
 - **⚙️ 设置** — Web UI 管理 API 密钥
 
 ## 🧾 Release Notes
+
+### v1.2.0
+
+- 自定义生图模型链路修复：Agnes 模型会显示为 Agnes，Images API 失败后不再误切到 chat-compatible GPT Image 链路。
+- 定时日程、现在在干嘛和日程重抽不再把衣柜衣架图当作直接图生图底图；衣柜仅作为发型/穿搭风格偏好参考。
+- 实时诊断日志持久化到 `logs/gallery.log`，重启不丢失，并自动清理 3 天前轮转日志。
+- 诊断弹窗只展示最新 3 条原始错误，原始错误区域单独上色，`content_policy_violation` 等错误会中文化提示。
+- 微信/Hermes 推送增加串行队列和 iLink cooldown 识别，图片已送达但文案被限流时不再把整次推送标红。
+- 生图失败、来源、模型名和文生图/图生图元数据展示继续收敛，便于排查 Hermes/API、自定义生图和日程生图链路。
+
+### v1.1.9
+
+- 新增衣柜 Tab：收藏穿搭方案会集中展示，并可自动生成包含衣服、配饰和假发的衣架参考图，方便后续图生图。
+- 衣柜支持发型/穿搭编辑、衣架图重生、生成中软刷新和“用它生图”，减少生成过程中的闪屏和位置跳动。
+- 参考图链路从硬编码 cool / girly / sweet 改为参考图 profile：默认参考图写入 prompt，上传图会经 LLM 识图生成 prompt，定时生图由 LLM 选择匹配参考图，无明确匹配时随机兜底。
+- 定时生图、现在在干嘛和重 roll 链路继续对齐今日日程上下文，图片条目只保存单图 `schedule_time`，不再把全天计划塞进卡片详情。
+- 新增实时诊断日志入口，错误信息保留原始错误，其余尽量中文化，便于排查本地 GPT Image 中转、Gitee 回退和生图任务失败。
+- GPT Image Base URL 改为填写到 `/v1` 即可，自动适配 Images API 或 chat 兼容生图中转；Hermes/API 生图来源和文案展示继续优化。
 
 ### v1.1.8
 
