@@ -10,16 +10,18 @@ import asyncio
 import json
 import logging
 import os
+import random
 import re
 import shutil
 import sys
 import subprocess
 import time
 from logging.handlers import TimedRotatingFileHandler
-from datetime import datetime, time as dt_time
+from datetime import datetime, time as dt_time, timedelta
 from typing import Optional
 
 from aiohttp import web
+from apscheduler.events import EVENT_JOB_MISSED
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 
 from data import DailyEntry
@@ -50,11 +52,17 @@ from settings import (
 
 TODAY_PHOTO_SOURCES = {"cron", "web"}
 FAILED_SCHEDULE_TEXT = "生成失败"
-WECHAT_CAPTION_DELAY_SECONDS = 35
+WECHAT_CAPTION_DELAY_SECONDS = 3
 WECHAT_SEND_TIMEOUT_SECONDS = 90
 PHOTO_JOB_INFLIGHT_STALE_GRACE_SECONDS = 120
 WECHAT_RETRY_DELAYS_SECONDS = (60, 180)
 WECHAT_COOLDOWN_BUFFER_SECONDS = 5
+PHOTO_JOB_MISFIRE_GRACE_SECONDS = 10 * 60
+SCHEDULE_GENERATION_DEFAULT_START_MINUTE = 3 * 60
+SCHEDULE_GENERATION_DEFAULT_END_MINUTE = 6 * 60
+SCHEDULE_GENERATION_RETRY_DELAY_SECONDS = 10 * 60
+PHOTO_QUIET_START_MINUTE = 3 * 60
+PHOTO_QUIET_END_MINUTE = 6 * 60
 WECHAT_RETRYABLE_MARKERS = (
     "rate limited",
     "too many requests",
@@ -253,10 +261,12 @@ class PortraitGalleryApp:
         # APScheduler
         timezone = self.config.get("config", {}).get("timezone", "Asia/Shanghai")
         self.aps = AsyncIOScheduler(timezone=timezone)
+        self.aps.add_listener(self._handle_scheduler_event, EVENT_JOB_MISSED)
 
         # Backfill photo job controls
         self._photo_jobs_inflight: set[str] = set()
         self._photo_jobs_inflight_started: dict[str, float] = {}
+        self._photo_job_schedule_meta: dict[str, dict] = {}
         self._failed_photo_jobs: dict[str, dict] = self._load_failed_photo_jobs()
         self._inflight_lock = asyncio.Lock()
         self._backfill_semaphore = asyncio.Semaphore(1)
@@ -313,13 +323,180 @@ class PortraitGalleryApp:
         except Exception as e:
             logger.error(f"保存生图失败记录失败: {e}")
 
+    @staticmethod
+    def _minutes_to_hhmm(total_minutes: int) -> str:
+        total_minutes = max(0, min(23 * 60 + 59, int(total_minutes)))
+        return f"{total_minutes // 60:02d}:{total_minutes % 60:02d}"
+
+    @staticmethod
+    def _parse_hhmm_minutes(value: str) -> Optional[int]:
+        match = re.match(r"^\s*(\d{1,2}):(\d{2})\s*$", str(value or ""))
+        if not match:
+            return None
+        hour = int(match.group(1))
+        minute = int(match.group(2))
+        if not (0 <= hour <= 23 and 0 <= minute <= 59):
+            return None
+        return hour * 60 + minute
+
+    @classmethod
+    def _parse_schedule_time_range(cls, value: str) -> Optional[tuple[int, int]]:
+        match = re.match(
+            r"^\s*(\d{1,2})(?::(\d{2}))?\s*(?:-|~|至|到)\s*(\d{1,2})(?::(\d{2}))?\s*$",
+            str(value or ""),
+        )
+        if not match:
+            return None
+        start_hour = int(match.group(1))
+        start_minute = int(match.group(2) or 0)
+        end_hour = int(match.group(3))
+        end_minute = int(match.group(4) or 0)
+        if not (
+            0 <= start_hour <= 23
+            and 0 <= end_hour <= 23
+            and 0 <= start_minute <= 59
+            and 0 <= end_minute <= 59
+        ):
+            return None
+        start = start_hour * 60 + start_minute
+        end = end_hour * 60 + end_minute
+        if start >= end:
+            return None
+        return start, end
+
+    def _schedule_time_config(self) -> tuple[str, int, int]:
+        raw = str(self.config.get("config", {}).get("schedule_time", "03:00-06:00")).strip()
+        fixed = self._parse_hhmm_minutes(raw)
+        if fixed is not None:
+            return "fixed", fixed, fixed
+        window = self._parse_schedule_time_range(raw)
+        if window:
+            return "window", window[0], window[1]
+        logger.warning("schedule_time 配置无效，使用默认 03:00-06:00: %s", raw)
+        return "window", SCHEDULE_GENERATION_DEFAULT_START_MINUTE, SCHEDULE_GENERATION_DEFAULT_END_MINUTE
+
+    def _next_schedule_run_time(self, *, force_tomorrow: bool = False) -> datetime:
+        mode, start_minute, end_minute = self._schedule_time_config()
+        now = datetime.now()
+        today = now.date()
+
+        if mode == "fixed":
+            run_at = datetime.combine(today, dt_time(start_minute // 60, start_minute % 60))
+            if force_tomorrow or run_at <= now:
+                run_at += timedelta(days=1)
+            return run_at
+
+        current_minute = now.hour * 60 + now.minute
+        if force_tomorrow or current_minute >= end_minute:
+            target_date = today + timedelta(days=1)
+            low_minute = start_minute
+        elif current_minute < start_minute:
+            target_date = today
+            low_minute = start_minute
+        else:
+            target_date = today
+            low_minute = current_minute + 1
+            if low_minute >= end_minute:
+                target_date = today + timedelta(days=1)
+                low_minute = start_minute
+
+        selected_minute = random.randint(low_minute, end_minute - 1)
+        return datetime.combine(target_date, dt_time(selected_minute // 60, selected_minute % 60))
+
+    def _schedule_next_daily_job(self, *, force_tomorrow: bool = False) -> datetime:
+        run_at = self._next_schedule_run_time(force_tomorrow=force_tomorrow)
+        existing = self.aps.get_job("daily_schedule")
+        if existing:
+            existing.remove()
+        self.aps.add_job(
+            self.daily_job,
+            "date",
+            run_date=run_at,
+            id="daily_schedule",
+            misfire_grace_time=60 * 60,
+            coalesce=True,
+            max_instances=1,
+        )
+        logger.info("下次日程生成已设置: %s", run_at.strftime("%Y-%m-%d %H:%M"))
+        return run_at
+
+    def _is_schedule_generation_window_now(self) -> bool:
+        mode, start_minute, end_minute = self._schedule_time_config()
+        now = datetime.now()
+        current_minute = now.hour * 60 + now.minute
+        if mode == "fixed":
+            return current_minute == start_minute
+        return start_minute <= current_minute < end_minute
+
+    def _next_schedule_retry_time(self) -> Optional[datetime]:
+        mode, start_minute, end_minute = self._schedule_time_config()
+        if mode != "window":
+            start_minute = SCHEDULE_GENERATION_DEFAULT_START_MINUTE
+            end_minute = SCHEDULE_GENERATION_DEFAULT_END_MINUTE
+
+        now = datetime.now()
+        current_minute = now.hour * 60 + now.minute
+        retry_delay_minutes = max(1, SCHEDULE_GENERATION_RETRY_DELAY_SECONDS // 60)
+        if current_minute < start_minute:
+            retry_minute = start_minute
+        elif current_minute < end_minute:
+            retry_minute = min(end_minute - 1, current_minute + retry_delay_minutes)
+        else:
+            return None
+
+        run_at = datetime.combine(now.date(), dt_time(retry_minute // 60, retry_minute % 60))
+        if run_at <= now:
+            return None
+        return run_at
+
+    def _schedule_retry_or_next_daily_job(self) -> datetime:
+        retry_at = self._next_schedule_retry_time()
+        if retry_at:
+            existing = self.aps.get_job("daily_schedule")
+            if existing:
+                existing.remove()
+            self.aps.add_job(
+                self.daily_job,
+                "date",
+                run_date=retry_at,
+                id="daily_schedule",
+                misfire_grace_time=60 * 60,
+                coalesce=True,
+                max_instances=1,
+            )
+            logger.warning("日程生成失败，将在窗口内重试: %s", retry_at.strftime("%Y-%m-%d %H:%M"))
+            return retry_at
+        logger.warning("日程生成失败，当前已不在 03:00-06:00 重试窗口，改为等待下一天窗口")
+        return self._schedule_next_daily_job(force_tomorrow=True)
+
+    def _schedule_generation_ready(self, entry: Optional[DailyEntry]) -> bool:
+        if not entry or entry.status != "ok" or entry.source == "fallback":
+            return False
+        if not entry.schedule or entry.schedule == FAILED_SCHEDULE_TEXT:
+            return False
+        return not self._schedule_missing_required_periods(entry.schedule)
+
+    @staticmethod
+    def _is_photo_quiet_time(hour: int, minute: int = 0) -> bool:
+        total_minutes = int(hour) * 60 + int(minute)
+        return PHOTO_QUIET_START_MINUTE <= total_minutes < PHOTO_QUIET_END_MINUTE
+
+    @staticmethod
+    def _is_exact_hour_time(_hour: int, minute: int = 0) -> bool:
+        return int(minute) == 0
+
+    @classmethod
+    def _is_photo_quiet_now(cls) -> bool:
+        now = datetime.now()
+        return cls._is_photo_quiet_time(now.hour, now.minute)
+
     async def generate_and_save(self) -> DailyEntry:
         """生成日程 → 生图 → 保存"""
         # 1. 生成日程
         entry = await self.scheduler_gen.generate_today()
-        if not entry or entry.status == "failed":
+        if not entry or entry.status != "ok" or entry.source == "fallback":
             logger.error("日程生成失败")
-            if entry:
+            if entry and entry.source != "fallback":
                 save_schedule_entry(self.data_dir, entry)
             return entry
 
@@ -327,6 +504,11 @@ class PortraitGalleryApp:
 
         # 先保存 date-key 日程；后续图片条目会去掉全天计划字段，避免卡片重复承载大块日程。
         save_schedule_entry(self.data_dir, entry)
+
+        if self._is_photo_quiet_now():
+            logger.info("当前为 03:00-06:00 生图静默时段，只保存日程并恢复后续动态任务")
+            await self._schedule_dynamic_photos(entry.schedule)
+            return entry
 
         # 2. 生成图片
         selected_reference = {}
@@ -382,6 +564,7 @@ class PortraitGalleryApp:
         api_source: str = "",
         api_caption: str = "",
         image_model: str = "",
+        api_description: str = "",
     ) -> DailyEntry:
         """自定义 prompt 生图"""
         today_str = datetime.now().strftime("%Y-%m-%d")
@@ -447,10 +630,14 @@ class PortraitGalleryApp:
                 sum(ord(ch) for ch in f"{filename}|{user_prompt}|{shot_label}") % len(caption_templates)
             ]
 
+        display_prompt = str(api_description or "").strip()
+        if not display_prompt:
+            display_prompt = user_prompt[:80] if entry_source != "hermes_api" else "Hermes 自定义生图：按原始描述生成的场景、动作和穿搭。"
+
         entry = DailyEntry(
             date=today_str,
             outfit_style="自定义",
-            outfit=f"风格：自定义{' 模式：纯' if pure else ''} 视角：{shot_label} 穿搭：{user_prompt[:80]}",
+            outfit=f"风格：自定义{' 模式：纯' if pure else ''} 视角：{shot_label} 穿搭：{display_prompt}",
             schedule="",
             prompt=generation_prompt,
             caption=caption,
@@ -466,7 +653,7 @@ class PortraitGalleryApp:
             custom_ref_mode=custom_ref_mode,
         )
         save_schedule_entry(self.data_dir, entry)
-        self._update_image_metadata_caption(filename, caption)
+        self._update_image_metadata_caption(filename, caption, display_prompt)
         logger.info(f"自定义生图成功: {filename}")
         return entry
 
@@ -546,7 +733,7 @@ class PortraitGalleryApp:
                 except OSError:
                     pass
 
-    def _update_image_metadata_caption(self, filename: str, caption: str):
+    def _update_image_metadata_caption(self, filename: str, caption: str, display_outfit: str = ""):
         if not filename:
             return
         path = os.path.join(self.data_dir, "image_metadata.json")
@@ -557,6 +744,10 @@ class PortraitGalleryApp:
         if not isinstance(entry, dict):
             return
         entry["caption"] = str(caption or "").strip()
+        display_outfit = str(display_outfit or "").strip()
+        if display_outfit:
+            entry["display_outfit"] = display_outfit
+            entry["outfit_description"] = display_outfit
         tmp_path = f"{path}.tmp"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
@@ -837,7 +1028,17 @@ class PortraitGalleryApp:
     async def daily_job(self):
         """每日自动任务 - 生成日程并根据日程时间动态安排生图"""
         logger.info("执行每日日程生成...")
-        await self.refresh_schedule()
+        entry = None
+        try:
+            entry = await self.refresh_schedule()
+        except Exception as e:
+            logger.error("每日日程生成异常: %s", e, exc_info=True)
+        finally:
+            if getattr(self.aps, "running", False):
+                if self._schedule_generation_ready(entry):
+                    self._schedule_next_daily_job(force_tomorrow=True)
+                else:
+                    self._schedule_retry_or_next_daily_job()
 
     async def refresh_schedule(self):
         """Regenerate today's schedule and rebuild dynamic photo jobs."""
@@ -845,14 +1046,8 @@ class PortraitGalleryApp:
         # 生成新日程
         entry = await self.scheduler_gen.generate_today()
         
-        if not entry or entry.status != "ok":
-            logger.error("日程生成失败")
-            if entry and entry.schedule and entry.schedule != FAILED_SCHEDULE_TEXT:
-                save_schedule_entry(self.data_dir, entry)
-            return entry
-
         # LLM 不通时 scheduler 会返回 fallback；刷新按钮不应因此覆盖已有可用日程。
-        if entry.source == "fallback":
+        if not entry or entry.source == "fallback" or entry.status != "ok":
             existing_entry = self._today_schedule_entry()
             existing_missing = self._schedule_missing_required_periods(existing_entry.get("schedule", "")) if existing_entry else []
             if existing_entry and not existing_missing:
@@ -862,7 +1057,13 @@ class PortraitGalleryApp:
                 await self._schedule_dynamic_photos(preserved.schedule)
                 return preserved
             if existing_entry and existing_missing:
-                logger.warning(f"现有今日日程缺少时间段 {existing_missing}，使用兜底日程修复")
+                logger.warning(f"现有今日日程缺少时间段 {existing_missing}，无法直接保留")
+
+        if not entry or entry.status != "ok":
+            logger.error("日程生成失败")
+            if entry and entry.source != "fallback" and entry.schedule and entry.schedule != FAILED_SCHEDULE_TEXT:
+                save_schedule_entry(self.data_dir, entry)
+            return entry
 
         # 清除旧日程（日期 key）
         store = ScheduleStore(self.data_dir)
@@ -905,6 +1106,59 @@ class PortraitGalleryApp:
             return
         self._photo_jobs_inflight.discard(slot_key)
         self._photo_jobs_inflight_started.pop(slot_key, None)
+
+    @staticmethod
+    def _photo_job_id_for_time(time_text: str) -> str:
+        match = re.match(r"^\s*(\d{1,2}):(\d{2})", str(time_text or ""))
+        if not match:
+            return ""
+        return f"photo_dynamic_{int(match.group(1))}_{int(match.group(2))}"
+
+    def _handle_scheduler_event(self, event):
+        """Record missed dynamic photo jobs so they do not silently disappear."""
+        job_id = str(getattr(event, "job_id", "") or "")
+        if not job_id.startswith("photo_dynamic_"):
+            return
+
+        run_time = getattr(event, "scheduled_run_time", None)
+        if run_time is not None:
+            try:
+                run_time = run_time.astimezone(self.aps.timezone) if run_time.tzinfo else run_time
+            except Exception:
+                pass
+
+        meta = self._photo_job_schedule_meta.pop(job_id, {}) or {}
+        if run_time is None:
+            match = re.match(r"^photo_dynamic_(\d{1,2})_(\d{1,2})$", job_id)
+            if not match:
+                logger.warning("动态生图任务错过执行但无法解析时间: %s", job_id)
+                return
+            now = datetime.now()
+            run_time = datetime.combine(now.date(), dt_time(int(match.group(1)), int(match.group(2))))
+
+        date_text = run_time.strftime("%Y-%m-%d")
+        time_text = f"{run_time.hour:02d}:{run_time.minute:02d}"
+        if self._check_photo_exists_for_slot(date_text, time_text):
+            return
+
+        activity = str(meta.get("activity") or self._today_schedule_activity_map().get(time_text, "")).strip()
+        theme = str(meta.get("theme") or self._theme_for_hour(run_time.hour)).strip()
+        slot_key = f"{date_text} {time_text}"
+        self._failed_photo_jobs[slot_key] = {
+            "theme": theme,
+            "time": time_text,
+            "activity": activity,
+            "failed_at": datetime.now().isoformat(),
+            "error": f"APScheduler missed dynamic photo job {job_id} scheduled at {run_time.isoformat()}",
+            "error_summary": "服务当时繁忙，定时生图错过执行窗口，可手动重试",
+        }
+        self._save_failed_photo_jobs()
+        logger.warning(
+            "动态生图任务错过执行窗口，已转为可重试: %s time=%s activity=%s",
+            job_id,
+            time_text,
+            activity[:30],
+        )
 
     def _photo_job_stale_seconds(self) -> int:
         return image_process_timeout(self.config, with_reference_fallback=True) + PHOTO_JOB_INFLIGHT_STALE_GRACE_SECONDS
@@ -1282,6 +1536,7 @@ class PortraitGalleryApp:
         return (
             isinstance(entry, dict)
             and entry.get("status") == "ok"
+            and entry.get("source") != "fallback"
             and bool((entry.get("schedule") or "").strip())
             and entry.get("schedule") != FAILED_SCHEDULE_TEXT
         )
@@ -1335,6 +1590,7 @@ class PortraitGalleryApp:
         for job in self.aps.get_jobs():
             if job.id.startswith("photo_dynamic_"):
                 job.remove()
+                self._photo_job_schedule_meta.pop(job.id, None)
                 removed += 1
         if removed:
             logger.info(f"移除了 {removed} 个旧的动态生图任务")
@@ -1358,6 +1614,14 @@ class PortraitGalleryApp:
             if h < 0 or h > 23 or m < 0 or m > 59:
                 continue
 
+            schedule_time_str = f"{h:02d}:{m:02d}"
+            if self._is_photo_quiet_time(h, m):
+                logger.info("跳过生图静默时段任务: %s activity=%s", schedule_time_str, activity.strip()[:30])
+                continue
+            if self._is_exact_hour_time(h, m):
+                logger.info("跳过整点生图任务: %s activity=%s", schedule_time_str, activity.strip()[:30])
+                continue
+
             theme = self._theme_for_hour(h)
 
             job_id = f"photo_dynamic_{h}_{m}"
@@ -1369,7 +1633,6 @@ class PortraitGalleryApp:
                 continue
 
             run_time = datetime.combine(today, dt_time(h, m))
-            schedule_time_str = f"{h:02d}:{m:02d}"
             schedule_text_for_job = f"{schedule_time_str} {activity.strip()}".strip()
 
             # 已过期的时间点只跳过。自动补拍会在服务重启时把早上的漏拍
@@ -1411,7 +1674,15 @@ class PortraitGalleryApp:
                 run_date=item["run_time"],
                 args=[item["theme"], f"{item['hour']:02d}:{item['minute']:02d} {item['activity']}"],
                 id=item["id"],
+                misfire_grace_time=PHOTO_JOB_MISFIRE_GRACE_SECONDS,
+                coalesce=True,
+                max_instances=1,
             )
+            self._photo_job_schedule_meta[item["id"]] = {
+                "theme": item["theme"],
+                "time": f"{item['hour']:02d}:{item['minute']:02d}",
+                "activity": item["activity"],
+            }
             logger.info(
                 f"添加动态生图任务: {item['hour']:02d}:{item['minute']:02d} "
                 f"theme={item['theme']} period={item.get('period_label') or '-'} "
@@ -1646,6 +1917,25 @@ class PortraitGalleryApp:
         slot_key, time_text, activity_hint = self._slot_key_for_schedule_time(schedule_time)
         if not slot_key:
             return {"status": "error", "message": "invalid_time"}
+        time_match = re.match(r"^(\d{2}):(\d{2})$", time_text or "")
+        if time_match and self._is_photo_quiet_time(int(time_match.group(1)), int(time_match.group(2))):
+            return {
+                "status": "quiet_schedule_time",
+                "time": time_text,
+                "message": "03:00-05:59 不安排生图日程",
+            }
+        if time_match and self._is_exact_hour_time(int(time_match.group(1)), int(time_match.group(2))):
+            return {
+                "status": "exact_schedule_time",
+                "time": time_text,
+                "message": "日程生图时间需要上下浮动，不能是整点",
+            }
+        if self._is_photo_quiet_now():
+            return {
+                "status": "quiet_hours",
+                "time": time_text,
+                "message": "03:00-06:00 为日程生成时段，不执行生图",
+            }
 
         today_str = datetime.now().strftime("%Y-%m-%d")
         if self._check_photo_exists_for_slot(today_str, time_text):
@@ -1691,6 +1981,19 @@ class PortraitGalleryApp:
         """定时生图任务 - 调用 generate.py 完整链路"""
         logger.info(f"开始定时生图: theme={theme}, schedule_time={schedule_time}")
         slot_key, time_text, activity = self._slot_key_for_schedule_time(schedule_time)
+        job_id = self._photo_job_id_for_time(time_text)
+        if job_id:
+            self._photo_job_schedule_meta.pop(job_id, None)
+        if self._is_photo_quiet_now():
+            logger.info("跳过生图任务（当前为 03:00-06:00 日程生成时段）: %s", time_text or schedule_time)
+            return True
+        time_match = re.match(r"^(\d{2}):(\d{2})$", time_text or "")
+        if time_match and self._is_photo_quiet_time(int(time_match.group(1)), int(time_match.group(2))):
+            logger.info("跳过生图任务（计划时间落在 03:00-06:00 静默时段）: %s", time_text)
+            return True
+        if time_match and self._is_exact_hour_time(int(time_match.group(1)), int(time_match.group(2))):
+            logger.info("跳过生图任务（计划时间为整点，需上下浮动）: %s", time_text)
+            return True
         reserved_slot = False
         if slot_key and time_text:
             today_str, _, _ = slot_key.partition(" ")
@@ -1774,8 +2077,11 @@ class PortraitGalleryApp:
                         image_path = line.split("SUCCESS:", 1)[1].strip()
                     if "Synced to gallery" in line:
                         logger.info(f"定时生图成功: {line}")
-                    if "CAPTION:" in line:
-                        caption_text = line.split("CAPTION:", 1)[1].strip()
+                    if line.startswith("CAPTION:"):
+                        caption_text = self._prefer_caption_text(
+                            line.split("CAPTION:", 1)[1].strip(),
+                            caption_text,
+                        )
                         logger.info(f"Caption: {caption_text}")
                 logger.info(f"定时生图完成: theme={theme}")
                 if slot_key:
@@ -1917,10 +2223,44 @@ class PortraitGalleryApp:
                         entry = value
                         break
             caption = str((entry or {}).get("caption") or "").strip()
-            return caption or fallback or ""
+            fallback = str(fallback or "").strip()
+            if self._caption_text_usable(caption) or not self._caption_text_usable(fallback):
+                return caption or fallback or ""
+
+            def _repair_caption(all_data):
+                target = all_data.get(filename)
+                if isinstance(target, dict):
+                    target["caption"] = fallback
+                    return all_data
+                for value in all_data.values():
+                    if isinstance(value, dict) and value.get("image_filename") == filename:
+                        value["caption"] = fallback
+                        break
+                return all_data
+
+            try:
+                ScheduleStore(self.data_dir).update(_repair_caption)
+            except Exception as update_error:
+                logger.warning("修复画廊小心思失败，使用生成输出文案: %s", update_error)
+            return fallback
         except Exception as e:
             logger.warning("读取画廊小心思失败，使用生成输出文案: %s", e)
             return fallback or ""
+
+    @staticmethod
+    def _caption_text_usable(text: str) -> bool:
+        text = re.sub(r"\s+", "", str(text or "")).strip("，,。.!！?；;、")
+        return len(text) >= 4
+
+    @classmethod
+    def _prefer_caption_text(cls, candidate: str = "", current: str = "") -> str:
+        candidate = str(candidate or "").strip()
+        current = str(current or "").strip()
+        if cls._caption_text_usable(candidate):
+            return candidate
+        if cls._caption_text_usable(current):
+            return current
+        return candidate or current
 
     async def _send_to_wechat(self, image_path: str, caption: str) -> bool:
         """Send image and caption to WeChat via hermes CLI."""
@@ -1931,15 +2271,19 @@ class PortraitGalleryApp:
         integrations = self.config.get("integrations", {})
         hermes_cmd = integrations.get("hermes_cli", "") or os.getenv("HERMES_CLI", "") or shutil.which("hermes")
         if not hermes_cmd:
-            candidate = os.path.join(os.path.expanduser("~"), ".hermes", "hermes-agent", "venv", "bin", "hermes")
-            if os.path.exists(candidate):
-                hermes_cmd = candidate
+            venv_subdir = "Scripts" if sys.platform.startswith("win") else "bin"
+            candidate_names = ("hermes.exe", "hermes") if sys.platform.startswith("win") else ("hermes",)
+            for candidate_name in candidate_names:
+                candidate = os.path.join(os.path.expanduser("~"), ".hermes", "hermes-agent", "venv", venv_subdir, candidate_name)
+                if os.path.exists(candidate):
+                    hermes_cmd = candidate
+                    break
         if not hermes_cmd:
             logger.warning("未找到 Hermes CLI，跳过推送")
             return False
         channel = normalize_push_channel(channel)
         target = delivery.get("wechat_target") if channel == "wechat" else (
-            str(integrations.get("hermes_telegram_target") or "").strip()
+            str(delivery.get("telegram_target") or integrations.get("hermes_telegram_target") or "").strip()
             or "telegram"
         )
         label = "微信" if channel == "wechat" else "TG"
@@ -2157,36 +2501,14 @@ class PortraitGalleryApp:
                     return 0.0
         return 0.0
 
-    def _schedule_time(self) -> tuple[int, int]:
-        raw = str(self.config.get("config", {}).get("schedule_time", "07:00")).strip()
-        match = re.match(r"^(\d{1,2}):(\d{2})$", raw)
-        if not match:
-            logger.warning(f"schedule_time 配置无效，使用默认 07:00: {raw}")
-            return 7, 0
-        hour, minute = int(match.group(1)), int(match.group(2))
-        if not (0 <= hour <= 23 and 0 <= minute <= 59):
-            logger.warning(f"schedule_time 配置超出范围，使用默认 07:00: {raw}")
-            return 7, 0
-        return hour, minute
-
     def start(self):
         """启动所有服务（同步入口）"""
         asyncio.run(self._async_start())
 
     async def _async_start(self):
         """异步启动"""
-        # 每日日程生成（07:00）
-        self.aps.add_job(
-            self.daily_job,
-            "cron",
-            hour=self._schedule_time()[0],
-            minute=self._schedule_time()[1],
-            id="daily_schedule",
-        )
-
         self.aps.start()
-        sched_hour, sched_minute = self._schedule_time()
-        logger.info(f"定时任务已设置: 日程({sched_hour:02d}:{sched_minute:02d}) + 动态生图(根据日程时间)")
+        logger.info("动态任务调度器已启动")
 
         # 启动 Web 服务器
         runner = web.AppRunner(self.web_server.app)
@@ -2208,10 +2530,15 @@ class PortraitGalleryApp:
                 need_generate = False
 
         if need_generate:
-            logger.info("今日尚未生成完整日程，后台生成中...")
-            asyncio.create_task(self.daily_job())
+            if self._is_schedule_generation_window_now():
+                logger.info("今日尚未生成完整日程，后台生成中...")
+                asyncio.create_task(self.daily_job())
+            else:
+                run_at = self._schedule_next_daily_job(force_tomorrow=False)
+                logger.info("今日尚未生成完整日程，将等待日程生成窗口: %s", run_at.strftime("%Y-%m-%d %H:%M"))
         else:
             logger.info("今日已有数据")
+            self._schedule_next_daily_job(force_tomorrow=True)
             await self._schedule_dynamic_photos(today_schedule)
 
         # 保持运行

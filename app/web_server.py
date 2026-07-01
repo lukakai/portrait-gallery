@@ -1,11 +1,24 @@
 """Web 画廊服务器 - aiohttp"""
 import asyncio
-import fcntl
+try:
+    import fcntl
+except ImportError:
+    class _FcntlFallback:
+        LOCK_SH = 1
+        LOCK_EX = 2
+        LOCK_UN = 8
+
+        @staticmethod
+        def flock(_fd, _op):
+            return None
+
+    fcntl = _FcntlFallback()
 import hashlib
 import ipaddress
 import json
 import logging
 import os
+import shlex
 import shutil
 import sys
 import subprocess
@@ -39,7 +52,10 @@ from settings import (
     build_child_env,
     configured_python,
     image_process_timeout,
+    llm_choice_text,
     llm_request_config,
+    llm_response_excerpt,
+    llm_temperature_param_error,
     load_enabled_outfit_styles,
     load_runtime_persona,
     normalize_chat_url,
@@ -58,6 +74,8 @@ from settings import (
 )
 
 logger = logging.getLogger(__name__)
+
+GITHUB_RELEASE_API_URL = "https://api.github.com/repos/i-kirito/portrait-gallery/releases/latest"
 
 # 日期 key 正则：匹配 YYYY-MM-DD 格式
 DATE_KEY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
@@ -183,6 +201,7 @@ class GalleryServer:
         self.picxazz_sync = PicxazzSyncClient(config, data_dir)
         self._image_info_cache = {}
         self._wardrobe_image_locks: dict[str, asyncio.Lock] = {}
+        self._restart_scheduled = False
         os.makedirs(self.default_image_dir, exist_ok=True)
         os.makedirs(self.image_dir, exist_ok=True)
         os.makedirs(self.reference_dir, exist_ok=True)
@@ -298,10 +317,12 @@ class GalleryServer:
         self.app.router.add_post("/api/hermes/check-update", self.handle_hermes_check_update)
         self.app.router.add_get("/api/hermes/update", self.handle_hermes_check_update)
         self.app.router.add_post("/api/hermes/update", self.handle_hermes_update)
+        self.app.router.add_post("/api/hermes/restart", self.handle_hermes_restart)
         # 版本管理
         self.app.router.add_get("/api/version", self.handle_version)
         self.app.router.add_post("/api/check-update", self.handle_check_update)
         self.app.router.add_post("/api/update", self.handle_update)
+        self.app.router.add_post("/api/restart", self.handle_restart)
         # 日程彩蛋
         self.app.router.add_get("/api/schedule-detail", self.handle_schedule_detail)
         self.app.router.add_get("/api/photo-jobs", self.handle_photo_jobs)
@@ -335,6 +356,83 @@ class GalleryServer:
 
     async def handle_health(self, request: web.Request):
         return web.json_response({"status": "ok"})
+
+    def _schedule_python_restart(self, reason: str = "manual", delay: float = 0.8) -> tuple[bool, str]:
+        if self._restart_scheduled:
+            return True, "服务重启已在执行中。"
+
+        project_root = resolve_project_root(self.config_path, self.config)
+        run_script = project_root / "app" / "run_launch.sh"
+        if not run_script.is_file():
+            return False, f"找不到 Python 启动脚本：{run_script}"
+        log_path = project_root / "logs" / "gallery.log"
+        try:
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+        except OSError as e:
+            return False, f"无法创建日志目录：{e}"
+
+        child_delay = max(0.3, delay + 0.4)
+        command = (
+            f"sleep {child_delay:.1f}; "
+            f"cd {shlex.quote(str(project_root))}; "
+            f"exec {shlex.quote(str(run_script))} >> {shlex.quote(str(log_path))} 2>&1"
+        )
+        env = self._child_env()
+        self._restart_scheduled = True
+        try:
+            subprocess.Popen(
+                ["/bin/zsh", "-lc", command],
+                cwd=str(project_root),
+                env=env,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                start_new_session=True,
+            )
+        except OSError as e:
+            self._restart_scheduled = False
+            return False, f"启动 Python 重启进程失败：{e}"
+
+        logger.warning("Python 服务重启已安排: reason=%s delay=%.1fs script=%s", reason, delay, run_script)
+        loop = asyncio.get_running_loop()
+        loop.call_later(max(0.1, delay), lambda: os._exit(0))
+        return True, "服务即将以 Python 模式重启，不会拉取代码或修改本地设置。"
+
+    async def handle_restart(self, request: web.Request):
+        """Restart the Python service without git or config changes."""
+        scheduled, message = self._schedule_python_restart("api_restart")
+        return web.json_response(
+            {
+                "status": "ok" if scheduled else "restart_failed",
+                "restart_scheduled": bool(scheduled),
+                "will_restart": bool(scheduled),
+                "service_manager": "python",
+                "message": message,
+            },
+            status=202 if scheduled else 500,
+        )
+
+    async def handle_hermes_restart(self, request: web.Request):
+        """Hermes-friendly Python restart endpoint."""
+        scheduled, message = self._schedule_python_restart("hermes_api_restart")
+        return web.json_response(
+            {
+                "api": "hermes_restart",
+                "status": "ok" if scheduled else "restart_failed",
+                "restart_scheduled": bool(scheduled),
+                "will_restart": bool(scheduled),
+                "service_manager": "python",
+                "message": message,
+                "preserves": [
+                    "git working tree",
+                    "config/config.yaml",
+                    "data/",
+                    "logs/",
+                    "API Key / Base URL / appearance",
+                ],
+            },
+            status=202 if scheduled else 500,
+        )
 
     def _log_file_candidates(self) -> list[str]:
         candidates = []
@@ -398,6 +496,10 @@ class GalleryServer:
     @staticmethod
     def _diagnose_error_text(text: str) -> str:
         low = (text or "").lower()
+        if "status=no response" in low or "detail=no response" in low:
+            return "该次文本模型请求当时没有拿到响应，不等于模型不可用；如果后续已有成功记录，可以忽略这条旧错误。"
+        if "request_failed" in low or "请求超时" in low:
+            return "该次请求没有在超时时间内完成，请看原始错误里的超时或连接原因。"
         if "fallback is disabled" in low:
             return "Gitee 回退没有开启，GPT Image 失败后不会自动改走 Gitee。"
         if "content_policy_violation" in low or "safety system" in low:
@@ -542,6 +644,8 @@ class GalleryServer:
 
         if text.startswith("日程生成失败"):
             return "日程生成失败：重试后仍未拿到合格结果。"
+        if text.startswith("日程生成使用兜底结果，保留现有今日日程"):
+            return "文本模型暂时没有返回可用日程，已保留现有今日日程。"
 
         m = re.search(r'LLM 返回为空 \(attempt (\d+)\)', text)
         if m:
@@ -563,8 +667,17 @@ class GalleryServer:
             return "文本模型 JSON 解析失败。"
         if text.startswith("LLM config missing"):
             return "文本模型配置缺失：聊天接口地址或模型未填写。"
+        m = re.search(r'LLM call failed:\s*model=([^,\s]+),\s*status=([^,\s]+),\s*detail=(.*)', text)
+        if m:
+            model = m.group(1).strip()
+            detail = m.group(3).strip()
+            return f"文本模型请求失败（模型：{model}）：{cls._diagnose_error_text(detail)}"
         if text.startswith("LLM call error"):
             return "文本模型调用失败：" + cls._diagnose_error_text(text)
+        if text.startswith("LLM call returned invalid response"):
+            m = re.search(r'model=([^,\s]+)', text)
+            model = f"（模型：{m.group(1).strip()}）" if m else ""
+            return f"文本模型返回格式不完整{model}，没有可用内容。"
         if text.startswith("LLM call returned empty content"):
             return "文本模型返回空内容。"
 
@@ -696,6 +809,7 @@ class GalleryServer:
         raw_error_blocks = []
         current_raw_error_block = None
         in_error_block = False
+        resolved_after_index = 0
         total_count = 0
 
         def add_diagnostic(severity: int, key: str, line: str):
@@ -703,14 +817,25 @@ class GalleryServer:
 
         def start_raw_error_block(line: str):
             nonlocal current_raw_error_block
-            current_raw_error_block = [line]
+            current_raw_error_block = {"index": total_count, "lines": [line]}
             raw_error_blocks.append(current_raw_error_block)
 
         def append_raw_error_line(line: str):
             if current_raw_error_block is None:
                 start_raw_error_block(line)
             else:
-                current_raw_error_block.append(line)
+                current_raw_error_block["lines"].append(line)
+
+        def marks_resolved(level: str, logger_name: str, message: str) -> bool:
+            if level != "INFO":
+                return False
+            if message.startswith("持久化日志已启用") or message.startswith("画廊启动"):
+                return True
+            if message.startswith("日程生成成功"):
+                return True
+            if logger_name == "portrait_gallery" and message.startswith("日程已保存"):
+                return True
+            return False
 
         for raw in (text or "").splitlines():
             line = raw.rstrip()
@@ -725,6 +850,11 @@ class GalleryServer:
                 logger_name = match.group("logger")
                 message = match.group("message")
                 in_error_block = level in {"ERROR", "CRITICAL"}
+                if marks_resolved(level, logger_name, message):
+                    resolved_after_index = total_count
+                    raw_error_blocks = []
+                    current_raw_error_block = None
+                    in_error_block = False
                 if logger_name == "aiohttp.access":
                     translated = cls._translate_access_log(message)
                     if not translated:
@@ -761,7 +891,11 @@ class GalleryServer:
         for item in diagnostic_items:
             deduped[item[2]] = item
         diagnostic_items = sorted(deduped.values(), key=lambda item: item[0])
-        priority_items = [item for item in diagnostic_items if item[1] > 0]
+        priority_items = [
+            item
+            for item in diagnostic_items
+            if item[1] > 0 and (not resolved_after_index or item[0] > resolved_after_index)
+        ]
         info_items = [item for item in diagnostic_items if item[1] == 0]
         selected = priority_items[-max_items:]
         remaining = max(0, max_items - len(selected))
@@ -769,12 +903,16 @@ class GalleryServer:
             selected.extend(info_items[-remaining:])
         selected.sort(key=lambda item: item[0])
         diagnostics = [item[3] for item in selected]
-        selected_raw_error_blocks = raw_error_blocks[-max_raw_errors:]
+        selected_raw_error_blocks = [
+            block
+            for block in raw_error_blocks
+            if not resolved_after_index or block["index"] > resolved_after_index
+        ][-max_raw_errors:]
         raw_error_lines = []
         for idx, block in enumerate(selected_raw_error_blocks):
             if idx:
                 raw_error_lines.append("")
-            raw_error_lines.extend(block)
+            raw_error_lines.extend(block["lines"])
         output = [
             "运行诊断",
             f"已隐藏普通访问日志，只保留最近 {len(diagnostics)} 条有用信息。",
@@ -926,6 +1064,78 @@ class GalleryServer:
             if value not in ("", None):
                 result[key] = value
         return result
+
+    @staticmethod
+    def _reference_basename(value: str) -> str:
+        text = str(value or "").strip()
+        if not text:
+            return ""
+        text = unquote(text.split("?", 1)[0].split("#", 1)[0]).replace("\\", "/")
+        return os.path.basename(text)
+
+    def _wardrobe_reference_for_value(self, value: str) -> dict:
+        ref_name = self._reference_basename(value)
+        if not ref_name:
+            return {}
+        ref_text = str(value or "").replace("\\", "/")
+        if not ref_name.startswith("wardrobe_") and "/wardrobe/" not in ref_text:
+            return {}
+
+        for item in self._load_favorite_outfits():
+            wardrobe = self._favorite_outfit_wardrobe_response_item(item)
+            filename = str(wardrobe.get("filename") or "").strip()
+            url = str(wardrobe.get("url") or "").strip()
+            candidate_names = {
+                self._reference_basename(filename),
+                self._reference_basename(url),
+            }
+            if ref_name not in candidate_names:
+                continue
+
+            outfit = item.get("outfit") if isinstance(item.get("outfit"), dict) else {}
+            style = str(item.get("outfit_style") or outfit.get("风格") or "").strip()
+            label = f"衣柜 · {style}" if style else "衣柜"
+            result = {
+                "id": f"wardrobe_{hashlib.sha1((filename or ref_name).encode('utf-8')).hexdigest()[:12]}",
+                "filename": filename or ref_name,
+                "url": url,
+                "label": label,
+                "style": style or "wardrobe",
+                "source": "wardrobe",
+            }
+            prompt = str(wardrobe.get("prompt") or "").strip()
+            if prompt:
+                result["prompt"] = prompt
+            return result
+
+        return {
+            "filename": ref_name,
+            "label": "衣柜",
+            "style": "wardrobe",
+            "source": "wardrobe",
+        }
+
+    def _ensure_entry_reference_label(self, entry: dict) -> dict:
+        if not isinstance(entry, dict):
+            return entry
+
+        selected = entry.get("selected_reference") if isinstance(entry.get("selected_reference"), dict) else {}
+        if str(selected.get("label") or "").strip():
+            return entry
+
+        for field in ("requested_ref_image_path", "ref_image_path", "requested_ref_image", "ref_image"):
+            resolved = self._wardrobe_reference_for_value(entry.get(field, ""))
+            if not resolved:
+                continue
+            merged = dict(selected)
+            for key, value in resolved.items():
+                if value not in ("", None) and not merged.get(key):
+                    merged[key] = value
+            merged["label"] = resolved.get("label") or merged.get("label", "")
+            entry["selected_reference"] = merged
+            return entry
+
+        return entry
 
     @staticmethod
     def _favorite_outfit_wardrobe_status_response_item(item: dict) -> dict:
@@ -1939,13 +2149,12 @@ class GalleryServer:
         return ""
 
     def _github_api_url(self) -> str:
-        """Return the update-check GitHub API URL from local config or env."""
-        keys = self._load_api_keys_config()
+        """Return the fixed update-check GitHub API URL."""
         update_config = self.config.get("update", {}) if isinstance(self.config.get("update"), dict) else {}
         for value in (
-            keys.get("github_api"),
             os.getenv("GITHUB_RELEASE_API"),
             update_config.get("github_api"),
+            GITHUB_RELEASE_API_URL,
         ):
             url = str(value or "").strip()
             if url:
@@ -2247,9 +2456,15 @@ class GalleryServer:
             entry = await self.on_refresh_schedule()
             if entry and entry.status == "ok":
                 source = getattr(entry, "source", "") or ""
+                if source == "preserved":
+                    status_text = "preserved"
+                    message = "LLM 暂不可用，已保留当前今日日程。"
+                else:
+                    status_text = "ok"
+                    message = "日程已刷新。"
                 return web.json_response({
-                    "status": "preserved" if source == "preserved" else "ok",
-                    "message": "LLM 暂不可用，已保留当前今日日程。" if source == "preserved" else "日程已刷新。",
+                    "status": status_text,
+                    "message": message,
                     "entry": entry.to_dict(),
                 })
             return web.json_response({
@@ -2317,11 +2532,7 @@ class GalleryServer:
         local_gitee_url = str(keys_config.get("gitee_url", "") or "").strip()
         if local_gitee_url == default_gitee_url:
             local_gitee_url = ""
-        update_config = self.config.get("update", {}) if isinstance(self.config.get("update"), dict) else {}
-        default_github_api = str(update_config.get("github_api", "") or "").strip()
-        local_github_api = str(keys_config.get("github_api", "") or "").strip()
-        if local_github_api == default_github_api:
-            local_github_api = ""
+        default_github_api = self._github_api_url()
         persona = load_runtime_persona(self.config, self.data_dir)
         persona_source = normalize_persona_source(keys_config.get("persona_source"))
         local_image_dir = normalize_image_dir(keys_config.get("image_dir"), self.data_dir)
@@ -2350,6 +2561,15 @@ class GalleryServer:
             "gpt_base_url": local_gpt_base_url or default_gpt_base_url,
             "gpt_base_url_local": local_gpt_base_url,
             "gpt_base_url_default": default_gpt_base_url,
+            "gpt_image_endpoints": [
+                {
+                    "label": str(endpoint.get("label", "") or "").strip(),
+                    "base_url": str(endpoint.get("base_url", "") or "").strip(),
+                    "api_key": self._mask_key(str(endpoint.get("api_key", "") or "")),
+                }
+                for endpoint in (keys_config.get("gpt_image_endpoints") or [])
+                if isinstance(endpoint, dict)
+            ],
             "cpa_url": local_cpa_url or default_cpa_url,
             "cpa_url_local": local_cpa_url,
             "cpa_url_default": default_cpa_url,
@@ -2370,8 +2590,8 @@ class GalleryServer:
             "outfit_styles": DEFAULT_OUTFIT_STYLES,
             "enabled_outfit_styles": load_enabled_outfit_styles(self.config, self.data_dir),
             "github_proxy": self._github_proxy(),
-            "github_api": local_github_api or default_github_api,
-            "github_api_local": local_github_api,
+            "github_api": default_github_api,
+            "github_api_local": "",
             "github_api_default": default_github_api,
             "image_dir": effective_image_dir,
             "image_dir_local": local_image_dir,
@@ -2383,6 +2603,8 @@ class GalleryServer:
             "push_channel": push_channel,
             "push_channel_local": normalize_push_channel(local_push_channel_raw) if local_push_channel_raw else "",
             "push_agent": push_agent,
+            "hermes_cli": str(integrations.get("hermes_cli", "") or "").strip(),
+            "openclaw_cli": str(integrations.get("openclaw_cli", "") or "").strip(),
         })
 
     def _mask_key(self, key: str) -> str:
@@ -2390,6 +2612,49 @@ class GalleryServer:
         if not key or len(key) < 8:
             return ""
         return f"{key[:4]}{'*' * (len(key) - 8)}{key[-4:]}"
+
+    @staticmethod
+    def _looks_masked_key(value: str) -> bool:
+        return "*" in str(value or "")
+
+    def _clean_gpt_image_endpoints(self, raw_endpoints, existing_endpoints) -> tuple[list[dict], str]:
+        if raw_endpoints in (None, ""):
+            return [], ""
+        if not isinstance(raw_endpoints, list):
+            return [], "GPT Image 多端点格式不正确"
+
+        existing_by_key = {}
+        if isinstance(existing_endpoints, list):
+            for idx, endpoint in enumerate(existing_endpoints):
+                if not isinstance(endpoint, dict):
+                    continue
+                label = str(endpoint.get("label", "") or "").strip()
+                base_url = self._configured_image_base_url(str(endpoint.get("base_url", "") or "").strip())
+                existing_by_key[(label, base_url)] = endpoint
+                existing_by_key[(str(idx), base_url)] = endpoint
+
+        cleaned = []
+        for idx, endpoint in enumerate(raw_endpoints):
+            if not isinstance(endpoint, dict):
+                continue
+            label = str(endpoint.get("label", "") or "").strip()
+            base_url = self._configured_image_base_url(str(endpoint.get("base_url", "") or "").strip())
+            api_key = str(endpoint.get("api_key", "") or "").strip()
+            if not label and not base_url and not api_key:
+                continue
+            existing = existing_by_key.get((label, base_url)) or existing_by_key.get((str(idx), base_url)) or {}
+            if self._looks_masked_key(api_key):
+                api_key = str(existing.get("api_key", "") or "").strip()
+            if not base_url:
+                return [], f"第 {idx + 1} 个 GPT Image 端点缺少 Base URL"
+            if not api_key:
+                return [], f"第 {idx + 1} 个 GPT Image 端点缺少 API Key"
+            cleaned.append({
+                "label": label,
+                "base_url": base_url,
+                "api_key": api_key,
+            })
+        return cleaned, ""
 
     def _parse_outfit_parts(self, outfit_raw: str) -> dict:
         """Parse 风格/发型/穿搭/动作/场景 blocks from stored outfit text."""
@@ -2592,7 +2857,7 @@ class GalleryServer:
         if not parts:
             return ""
 
-        caption = "今天想过得松一点：" + "，".join(parts) + "，慢慢把心放下来。"
+        caption = "今天先按这个节奏来：" + "，".join(parts) + "，别把事情都拖到最后。"
         return caption[:90].rstrip("，,。.!！?；;、") + "。"
 
     @staticmethod
@@ -2604,6 +2869,7 @@ class GalleryServer:
             "主人", "亲一口", "抱抱", "怀里", "来找我玩", "被夸",
             "美照", "自拍", "拍照", "照片", "画面", "造型", "画廊",
             "记录", "收藏", "穿得这么", "好看", "性感",
+            "水珠", "叶尖", "擦亮", "像被阳光揉", "温柔照顾", "书签", "光落下来",
         )
         if any(marker in text for marker in bad_markers):
             return False
@@ -2622,6 +2888,7 @@ class GalleryServer:
             and bool((entry.get("schedule") or "").strip())
             and entry.get("schedule") != FAILED_SCHEDULE_TEXT
             and entry.get("status") == "ok"
+            and entry.get("source") != "fallback"
         )
 
     @staticmethod
@@ -2722,6 +2989,8 @@ class GalleryServer:
                 "selected_reference",
                 "model_name",
                 "caption",
+                "display_outfit",
+                "outfit_description",
             ):
                 if field in meta_entry and (field not in normalized or normalized.get(field) in ("", None)):
                     normalized[field] = meta_entry.get(field)
@@ -2733,6 +3002,25 @@ class GalleryServer:
                 normalized["size"] = meta_entry.get("size")
             if normalized.get("generation_time") is None and meta_entry.get("generation_time") is not None:
                 normalized["generation_time"] = meta_entry.get("generation_time")
+
+        if source == "hermes_api":
+            display_outfit = self._clean_display_description(
+                normalized.get("display_outfit") or normalized.get("outfit_description") or ""
+            )
+            current_outfit = normalized.get("outfit", "")
+            if display_outfit and self._has_cjk(display_outfit) and (
+                not self._has_cjk(current_outfit) or re.search(r"[A-Za-z]{16,}", current_outfit)
+            ):
+                style_name = normalized.get("outfit_style") or "自定义"
+                view_match = re.search(r"视角[：:]\s*([^ \n，,。；;]+)", current_outfit)
+                mode_match = re.search(r"模式[：:]\s*([^ \n，,。；;]+)", current_outfit)
+                parts = [f"风格：{style_name}"]
+                if mode_match:
+                    parts.append(f"模式：{mode_match.group(1)}")
+                if view_match:
+                    parts.append(f"视角：{view_match.group(1)}")
+                parts.append(f"穿搭：{display_outfit}")
+                normalized["outfit"] = " ".join(parts)
         if img_file:
             image_info = self._image_file_info(img_file)
             if image_info.get("size"):
@@ -2757,6 +3045,7 @@ class GalleryServer:
             normalized.setdefault("outfit_full", normalized.get("outfit", ""))
             normalized["outfit"] = outfit_for_display
 
+        self._ensure_entry_reference_label(normalized)
         return normalized
 
     @staticmethod
@@ -3029,6 +3318,11 @@ class GalleryServer:
                 "聊天图生图" if is_img2img else "聊天生图"
             )
         )
+        display_outfit = self._clean_display_description(
+            meta.get("display_outfit") or meta.get("outfit_description") or ""
+        )
+        if source == "hermes_api" and not display_outfit:
+            display_outfit = self._fallback_hermes_display_description(prompt, outfit_label)
         return {
             "id": filename,
             "date": date_text,
@@ -3036,7 +3330,7 @@ class GalleryServer:
             "model_name": self._display_model_name(model_name),
             "base_style": str(meta.get("base_style") or "").strip(),
             "outfit_style": "自定义",
-            "outfit": f"风格：自定义 穿搭：{outfit_label}",
+            "outfit": f"风格：自定义 穿搭：{display_outfit or outfit_label}",
             "image_path": f"/images/{filename}",
             "image_filename": filename,
             "prompt": prompt,
@@ -3120,8 +3414,7 @@ class GalleryServer:
                     raw_default_gpt_base_url = str(image_config.get("gpt_base_url", "") or "").strip()
                     default_gpt_base_url = self._configured_image_base_url(raw_default_gpt_base_url)
                     default_gitee_url = str(image_config.get("gitee_url", "") or "").strip()
-                    update_config = self.config.get("update", {}) if isinstance(self.config.get("update"), dict) else {}
-                    default_github_api = str(update_config.get("github_api", "") or "").strip()
+                    default_github_api = self._github_api_url()
                     self._drop_redundant_local_url_override(
                         keys_config,
                         "gpt_base_url",
@@ -3138,11 +3431,7 @@ class GalleryServer:
                         "gitee_url",
                         default_gitee_url,
                     )
-                    self._drop_redundant_local_url_override(
-                        keys_config,
-                        "github_api",
-                        default_github_api,
-                    )
+                    keys_config.pop("github_api", None)
 
                     # 更新配置（只更新提供的字段）
                     if "gpt_key" in body and body["gpt_key"]:
@@ -3153,6 +3442,14 @@ class GalleryServer:
                             body.get("gpt_base_url"),
                             default_gpt_base_url,
                         )
+                    if "gpt_image_endpoints" in body:
+                        cleaned_endpoints, endpoint_error = self._clean_gpt_image_endpoints(
+                            body.get("gpt_image_endpoints"),
+                            keys_config.get("gpt_image_endpoints") or [],
+                        )
+                        if endpoint_error:
+                            return web.json_response({"error": endpoint_error, "message": endpoint_error}, status=400)
+                        keys_config["gpt_image_endpoints"] = cleaned_endpoints
                     if "cpa_url" in body:
                         self._store_local_url_override(
                             keys_config,
@@ -3168,13 +3465,6 @@ class GalleryServer:
                             "gitee_url",
                             body.get("gitee_url"),
                             default_gitee_url,
-                        )
-                    if "github_api" in body:
-                        self._store_local_url_override(
-                            keys_config,
-                            "github_api",
-                            body.get("github_api"),
-                            default_github_api,
                         )
                     # appearance: always update (empty string = remove local appearance)
                     if "appearance" in body:
@@ -3223,7 +3513,7 @@ class GalleryServer:
                             ("GPT Image Key", body.get("gpt_key") or keys_config.get("gpt_key")),
                             ("CPA Base URL", keys_config.get("cpa_url")),
                             ("CPA API Key", body.get("cpa_key") or keys_config.get("cpa_key")),
-                            ("GitHub Release API URL", keys_config.get("github_api")),
+                            ("GitHub Release API URL", default_github_api),
                             ("GitHub API 代理", keys_config.get("github_proxy")),
                         ]
                         missing = [label for label, value in required_fields if not str(value or "").strip()]
@@ -3282,6 +3572,27 @@ class GalleryServer:
                     logger.info(f"LLM model updated to: {body['llm_model']}")
                 except Exception as e:
                     logger.error(f"Save llm_model error: {e}")
+
+            hermes_or_openclaw_keys = [key for key in ("hermes_cli", "openclaw_cli") if key in body]
+            if hermes_or_openclaw_keys and self.config_path and os.path.exists(self.config_path):
+                try:
+                    import yaml
+                    with open(self.config_path, 'r', encoding='utf-8') as f:
+                        full_config = yaml.safe_load(f) or {}
+                    if "integrations" not in full_config or not isinstance(full_config.get("integrations"), dict):
+                        full_config["integrations"] = {}
+                    for key in hermes_or_openclaw_keys:
+                        value = str(body.get(key) or "").strip()
+                        if value:
+                            full_config["integrations"][key] = value
+                        else:
+                            full_config["integrations"].pop(key, None)
+                    with open(self.config_path, 'w', encoding='utf-8') as f:
+                        yaml.dump(full_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
+                    self.config["integrations"] = full_config["integrations"]
+                    logger.info("Integrations updated: %s", hermes_or_openclaw_keys)
+                except Exception as e:
+                    logger.error(f"Save integrations error: {e}")
 
             if image_dir_changed:
                 self._set_runtime_image_dir(self._resolve_image_dir())
@@ -3362,6 +3673,33 @@ class GalleryServer:
             return data.strip()[:500]
         return f"HTTP {resp.status}"
 
+    @staticmethod
+    def _llm_test_failure_summary(attempts: list[dict]) -> str:
+        if not attempts:
+            return ""
+        parts = []
+        for item in attempts[-5:]:
+            index = item.get("attempt", "?")
+            status = item.get("status")
+            detail = str(item.get("detail") or "").strip()
+            message = str(item.get("message") or "").strip()
+            text = detail or message
+            if status:
+                head = f"第 {index} 次 HTTP {status}"
+            else:
+                head = f"第 {index} 次"
+            if text:
+                parts.append(f"{head}: {text[:160]}")
+            else:
+                parts.append(head)
+        return "；".join(parts)
+
+    @staticmethod
+    def _llm_test_final_message(failures: list[dict], attempts: int) -> str:
+        if failures and all(item.get("kind") == "empty_content" for item in failures):
+            return f"原始接口已连通，但连续 {attempts} 次没有返回可读取文本；日程生成需要文本内容。"
+        return f"模型连续测试 {attempts} 次都失败。"
+
     async def handle_test_llm_model(self, request: web.Request):
         """Send a tiny chat completion request to verify the selected schedule LLM model."""
         try:
@@ -3389,6 +3727,17 @@ class GalleryServer:
                     "success": False,
                     "message": "未选择要测试的日程生成模型。",
                 }, status=400)
+            disable_thinking = "deepseek" in model.lower()
+            try:
+                attempts = int(body.get("attempts") or 5)
+            except (TypeError, ValueError):
+                attempts = 5
+            attempts = max(1, min(8, attempts))
+            try:
+                timeout_seconds = int(body.get("timeout_seconds") or 12)
+            except (TypeError, ValueError):
+                timeout_seconds = 12
+            timeout_seconds = max(5, min(20, timeout_seconds))
 
             headers = {"Content-Type": "application/json"}
             if api_key:
@@ -3400,58 +3749,130 @@ class GalleryServer:
                 ],
                 "max_tokens": 16,
                 "temperature": 0,
+                "stream": False,
             }
-            started = time.monotonic()
-            timeout = aiohttp.ClientTimeout(total=20)
+            if disable_thinking:
+                payload["thinking"] = {"type": "disabled"}
+            failures = []
+            timeout = aiohttp.ClientTimeout(total=timeout_seconds)
             async with aiohttp.ClientSession(trust_env=True, timeout=timeout) as session:
-                async with session.post(chat_url, headers=headers, json=payload) as resp:
-                    elapsed_ms = int((time.monotonic() - started) * 1000)
+                for attempt in range(1, attempts + 1):
+                    started = time.monotonic()
                     try:
-                        data = await resp.json()
-                    except Exception:
-                        data = await resp.text()
-                    if resp.status != 200:
-                        detail = self._llm_test_response_error(resp, data)
-                        return web.json_response({
-                            "success": False,
-                            "model": model,
-                            "status": resp.status,
-                            "latency_ms": elapsed_ms,
-                            "message": f"模型不可用：HTTP {resp.status}",
-                            "detail": detail,
-                        }, status=200)
-                    choices = data.get("choices") if isinstance(data, dict) else None
-                    if not choices:
-                        detail = self._llm_test_response_error(resp, data)
-                        return web.json_response({
-                            "success": False,
-                            "model": model,
-                            "status": resp.status,
-                            "latency_ms": elapsed_ms,
-                            "message": "模型返回格式不完整，没有 choices。",
-                            "detail": detail,
-                        }, status=200)
-                    msg = choices[0].get("message", {}) if isinstance(choices[0], dict) else {}
-                    content = str(msg.get("content") or msg.get("reasoning_content") or "").strip()
-                    if not content:
-                        return web.json_response({
-                            "success": False,
-                            "model": model,
-                            "status": resp.status,
-                            "latency_ms": elapsed_ms,
-                            "message": "模型有响应，但内容为空。",
-                        }, status=200)
-                    return web.json_response({
-                        "success": True,
-                        "model": model,
-                        "latency_ms": elapsed_ms,
-                        "message": f"模型可用，响应 {elapsed_ms}ms。",
-                        "reply": content[:80],
-                    })
+                        async with session.post(chat_url, headers=headers, json=payload) as resp:
+                            elapsed_ms = int((time.monotonic() - started) * 1000)
+                            try:
+                                data = await resp.json()
+                            except Exception:
+                                data = await resp.text()
+                            adjusted = False
+                            if (
+                                resp.status == 400
+                                and "temperature" in payload
+                                and llm_temperature_param_error(data)
+                            ):
+                                retry_payload = dict(payload)
+                                retry_payload.pop("temperature", None)
+                                adjusted = True
+                                started = time.monotonic()
+                                async with session.post(chat_url, headers=headers, json=retry_payload) as retry_resp:
+                                    elapsed_ms = int((time.monotonic() - started) * 1000)
+                                    try:
+                                        data = await retry_resp.json()
+                                    except Exception:
+                                        data = await retry_resp.text()
+                                    resp = retry_resp
+                            if (
+                                resp.status == 400
+                                and "thinking" in payload
+                                and "thinking" in llm_response_excerpt(data, 500).lower()
+                            ):
+                                retry_payload = dict(payload)
+                                retry_payload.pop("thinking", None)
+                                adjusted = True
+                                started = time.monotonic()
+                                async with session.post(chat_url, headers=headers, json=retry_payload) as retry_resp:
+                                    elapsed_ms = int((time.monotonic() - started) * 1000)
+                                    try:
+                                        data = await retry_resp.json()
+                                    except Exception:
+                                        data = await retry_resp.text()
+                                    resp = retry_resp
+                            if resp.status != 200:
+                                detail = self._llm_test_response_error(resp, data)
+                                failures.append({
+                                    "attempt": attempt,
+                                    "status": resp.status,
+                                    "latency_ms": elapsed_ms,
+                                    "message": f"HTTP {resp.status}",
+                                    "detail": detail,
+                                    "adjusted_temperature": adjusted,
+                                })
+                            else:
+                                choices = data.get("choices") if isinstance(data, dict) else None
+                                if not choices:
+                                    detail = self._llm_test_response_error(resp, data)
+                                    failures.append({
+                                        "attempt": attempt,
+                                        "kind": "invalid_response",
+                                        "status": resp.status,
+                                        "latency_ms": elapsed_ms,
+                                        "message": "模型返回格式不完整，没有 choices",
+                                        "detail": detail,
+                                    })
+                                else:
+                                    content = llm_choice_text(choices[0])
+                                    if not content:
+                                        failures.append({
+                                            "attempt": attempt,
+                                            "kind": "empty_content",
+                                            "status": resp.status,
+                                            "latency_ms": elapsed_ms,
+                                            "message": "接口连通，但未返回可读取文本",
+                                            "detail": llm_response_excerpt(data),
+                                        })
+                                    else:
+                                        return web.json_response({
+                                            "success": True,
+                                            "model": model,
+                                            "attempt": attempt,
+                                            "attempts": attempts,
+                                            "failed_attempts": failures[-3:],
+                                            "adjusted_temperature": adjusted,
+                                            "latency_ms": elapsed_ms,
+                                            "message": (
+                                                f"模型可用，第 {attempt}/{attempts} 次测试成功，响应 {elapsed_ms}ms。"
+                                                + ("已自动去掉不兼容参数。" if adjusted else "")
+                                            ),
+                                            "reply": content[:80],
+                                        })
+                    except asyncio.TimeoutError:
+                        failures.append({
+                            "attempt": attempt,
+                            "message": f"测试超时：{timeout_seconds} 秒内没有收到模型响应",
+                        })
+                    except Exception as exc:
+                        failures.append({
+                            "attempt": attempt,
+                            "message": f"请求失败：{exc}",
+                        })
+                    if attempt < attempts:
+                        await asyncio.sleep(0.35)
+
+            detail = self._llm_test_failure_summary(failures)
+            return web.json_response({
+                "success": False,
+                "model": model,
+                "reachable": any(item.get("status") == 200 for item in failures),
+                "attempts": attempts,
+                "failed_attempts": failures[-5:],
+                "message": self._llm_test_final_message(failures, attempts),
+                "detail": detail,
+            }, status=200)
         except asyncio.TimeoutError:
             return web.json_response({
                 "success": False,
-                "message": "测试超时：20 秒内没有收到模型响应。",
+                "message": "测试超时：没有收到模型响应。",
             }, status=200)
         except Exception as e:
             logger.error(f"Test LLM model error: {e}")
@@ -4095,18 +4516,275 @@ class GalleryServer:
         return ""
 
     @staticmethod
-    def _request_caption(body: dict) -> str:
+    def _clean_caption_text(text: str, limit: int = 180) -> str:
+        text = re.sub(r"\r\n?", "\n", str(text or "")).strip()
+        text = re.sub(r"^```(?:json|text|markdown)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+        text = text.strip(" \t\n\r\"'“”‘’")
+        if len(text) > limit:
+            text = text[:limit].rstrip(" \t\n\r，,。.!！?；;、") + "…"
+        return text
+
+    @staticmethod
+    def _caption_text_usable(text: str) -> bool:
+        text = re.sub(r"\s+", "", str(text or "")).strip("，,。.!！?；;、")
+        return len(text) >= 4
+
+    @classmethod
+    def _prefer_caption_text(cls, candidate: str = "", current: str = "") -> str:
+        candidate = cls._clean_caption_text(candidate)
+        current = cls._clean_caption_text(current)
+        if cls._caption_text_usable(candidate):
+            return candidate
+        if cls._caption_text_usable(current):
+            return current
+        return candidate or current
+
+    @classmethod
+    def _parse_stdout_caption(cls, stdout_text: str) -> str:
+        caption = ""
+        for line in str(stdout_text or "").splitlines():
+            line = line.strip()
+            if line.startswith("CAPTION:"):
+                caption = cls._prefer_caption_text(line.split("CAPTION:", 1)[1].strip(), caption)
+        return caption
+
+    @classmethod
+    def _request_caption(cls, body: dict) -> str:
         """Read caller-provided copy that should be shown as gallery 小心思."""
         if not isinstance(body, dict):
             return ""
-        for key in ("caption", "thought", "small_thought", "copy", "copywriting", "message"):
+        keys = (
+            "caption",
+            "thought",
+            "small_thought",
+            "smallThought",
+            "inner_thought",
+            "innerThought",
+            "mind",
+            "comment",
+            "commentary",
+            "copy",
+            "copy_text",
+            "copyText",
+            "copywriting",
+            "message",
+            "text",
+        )
+
+        def _iter_sources(value):
+            if isinstance(value, dict):
+                yield value
+                for nested_key in ("gallery", "meta", "metadata", "extra", "data"):
+                    nested = value.get(nested_key)
+                    if isinstance(nested, dict):
+                        yield nested
+            else:
+                return
+
+        for source in _iter_sources(body):
+            for key in keys:
+                value = source.get(key)
+                if value is None:
+                    continue
+                text = cls._clean_caption_text(value)
+                if text:
+                    return text
+        return ""
+
+    @staticmethod
+    def _fallback_hermes_caption(description: str, prompt: str = "") -> str:
+        """Build a short Chinese 小心思 only when Hermes did not provide one."""
+        description = str(description or "")
+        prompt = str(prompt or "")
+        source = re.sub(r"\s+", " ", description or prompt).strip(" ，,。.!！?；;、")
+        if len(source) > 28:
+            source = source[:28].rstrip(" ，,。.!！?；;、")
+        combined = f"{description} {prompt}"
+        lower = combined.lower()
+
+        def has_any(words: tuple[str, ...]) -> bool:
+            return any(word in combined or word.lower() in lower for word in words)
+
+        rest_scene = has_any((
+            "午休", "小憩", "打盹", "眯一会", "眯一会儿", "沙发", "毯子", "躺",
+            "半闭", "休息", "nap", "sleepy", "drowsy", "couch", "sofa", "blanket",
+            "lying back", "rest",
+        ))
+        if rest_scene:
+            return "先靠着沙发眯一会儿，醒了再把后面的事慢慢接上。"
+
+        meal_scene = has_any((
+            "早餐", "午餐", "晚餐", "吃饭", "用餐", "便当", "饭团", "餐桌", "叉子",
+            "筷子", "食物", "料理", "一口", "eating", "dining table", "fork",
+            "chopsticks", "rice ball", "bento", "meal", "food", "cutlery",
+        ))
+        if meal_scene:
+            return "先把这一口吃完，再把今天剩下的事慢慢接住。"
+        if has_any(("desk", "电脑", "办公")):
+            return "忙里偷出这一小会儿，感觉今天也能轻一点。"
+        if has_any(("book", "书房", "复古")):
+            return "这个角落刚好安静，适合把心情也放慢一点。"
+        if source:
+            return f"看着「{source}」这一刻，心里忽然有点想把它留住。"
+        return "这一张先收进今天的小格子里，回头再慢慢看。"
+
+    @staticmethod
+    def _has_cjk(text: str) -> bool:
+        return bool(re.search(r"[\u4e00-\u9fff]", str(text or "")))
+
+    def _clean_display_description(self, text: str, limit: int = 120) -> str:
+        """Normalize caller/LLM text into one Chinese gallery-facing description."""
+        text = re.sub(r"\r\n?", "\n", str(text or "")).strip()
+        text = re.sub(r"^```(?:json|text|markdown)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+        text = text.strip(" \t\n\r\"'“”‘’")
+        if not text:
+            return ""
+        parts = self._parse_outfit_parts(text)
+        for key in ("穿搭", "描述", "场景"):
+            if parts.get(key):
+                text = parts[key]
+                break
+        text = re.sub(r"^(?:中文)?(?:穿搭)?(?:描述|说明|文案|展示文案|outfit|description)\s*[：:]\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" ，,。.!！?；;、")
+        if len(text) > limit:
+            text = text[:limit].rstrip(" ，,。.!！?；;、") + "…"
+        return text
+
+    def _request_outfit_description(self, body: dict) -> str:
+        """Read caller-provided outfit/scene copy for gallery display."""
+        if not isinstance(body, dict):
+            return ""
+        keys = (
+            "outfit_description",
+            "outfit_text",
+            "display_outfit",
+            "display_description",
+            "description",
+            "summary",
+            "outfit",
+        )
+        for key in keys:
             value = body.get(key)
             if value is None:
                 continue
-            text = re.sub(r"\r\n?", "\n", str(value)).strip()
+            text = self._clean_display_description(value)
             if text:
                 return text
         return ""
+
+    def _fallback_hermes_display_description(self, prompt: str, mode_label: str = "") -> str:
+        prompt = str(prompt or "").strip()
+        if self._has_cjk(prompt) and not re.search(r"[A-Za-z]{16,}", prompt):
+            return self._clean_display_description(prompt)
+        keywords = self._fallback_outfit_keywords_from_prompt(prompt)
+        if keywords:
+            return f"Hermes 自定义生图：{keywords}"
+        mode = self._clean_display_description(mode_label) or "自定义生图"
+        return f"Hermes {mode}：按原始描述生成的场景、动作和穿搭。"
+
+    @classmethod
+    def _is_usable_hermes_display_description(cls, text: str) -> bool:
+        text = cls._clean_display_description_static(text)
+        if not text or not cls._has_cjk(text):
+            return False
+        lower = text.lower()
+        forbidden_markers = (
+            "用户的指令",
+            "用户要求",
+            "我们被要求",
+            "只输出",
+            "不要英文",
+            "不要解释",
+            "提示词",
+            "给定的",
+            "下面的",
+            "prompt",
+        )
+        if any(marker in lower for marker in forbidden_markers):
+            return False
+        return not bool(re.search(r"[A-Za-z]{4,}", text))
+
+    @staticmethod
+    def _clean_display_description_static(text: str, limit: int = 120) -> str:
+        text = re.sub(r"\r\n?", "\n", str(text or "")).strip()
+        text = re.sub(r"^```(?:json|text|markdown)?\s*|\s*```$", "", text, flags=re.IGNORECASE).strip()
+        text = text.strip(" \t\n\r\"'“”‘’")
+        text = re.sub(r"^(?:中文)?(?:穿搭)?(?:描述|说明|文案|展示文案|outfit|description)\s*[：:]\s*", "", text, flags=re.IGNORECASE)
+        text = re.sub(r"\s+", " ", text).strip(" ，,。.!！?；;、")
+        if len(text) > limit:
+            text = text[:limit].rstrip(" ，,。.!！?；;、") + "…"
+        return text
+
+    async def _translate_hermes_prompt_for_display(self, prompt: str) -> str:
+        prompt = re.sub(r"\s+", " ", str(prompt or "")).strip()
+        if not prompt:
+            return ""
+        request_config = llm_request_config(self.config, self.data_dir)
+        chat_url = request_config.get("chat_url", "")
+        models = request_config.get("models") or []
+        if not chat_url or not models:
+            logger.warning("Hermes display description translation skipped: missing chat_url/models")
+            return ""
+
+        source_prompt = prompt[:1200]
+        instruction = (
+            "把下面 Hermes 生图 prompt 压缩成一条中文画廊展示描述。"
+            "只输出中文一句话，45-90字，概括场景、动作、穿搭和发型；"
+            "不要英文，不要解释，不要列表，不要复述画质参数。\n\n"
+            f"Prompt:\n{source_prompt}"
+        )
+        headers = {"Content-Type": "application/json"}
+        api_key = request_config.get("api_key", "")
+        if api_key:
+            headers["Authorization"] = f"Bearer {api_key}"
+
+        def _post_llm(model: str):
+            import requests
+            payload = {
+                "model": model,
+                "messages": [{"role": "user", "content": instruction}],
+                "max_tokens": 220,
+                "temperature": 0.2,
+            }
+            resp = requests.post(chat_url, headers=headers, json=payload, timeout=5)
+            if resp.status_code == 400:
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = resp.text
+                if llm_temperature_param_error(body):
+                    payload.pop("temperature", None)
+                    return requests.post(chat_url, headers=headers, json=payload, timeout=5)
+            return resp
+
+        loop = asyncio.get_running_loop()
+        for model in models[:1]:
+            try:
+                resp = await loop.run_in_executor(None, lambda m=model: _post_llm(m))
+                if resp is None or resp.status_code != 200:
+                    status = resp.status_code if resp is not None else "no response"
+                    logger.warning("Hermes display description translation failed: model=%s status=%s", model, status)
+                    continue
+                data = resp.json()
+                choices = data.get("choices") if isinstance(data, dict) else None
+                if not choices:
+                    logger.warning("Hermes display description translation invalid response: model=%s", model)
+                    continue
+                content = self._clean_display_description(llm_choice_text(choices[0]))
+                if self._is_usable_hermes_display_description(content):
+                    return content
+            except Exception as e:
+                logger.warning("Hermes display description translation error: model=%s err=%s", model, e)
+        return ""
+
+    async def _normalize_hermes_display_description(self, description: str, prompt: str, mode_label: str = "") -> str:
+        description = self._clean_display_description(description)
+        if self._is_usable_hermes_display_description(description):
+            return description
+        translated = await self._translate_hermes_prompt_for_display(prompt)
+        if translated:
+            return translated
+        return self._fallback_hermes_display_description(prompt, mode_label)
 
     async def handle_gallery(self, request: web.Request):
         """获取所有画廊条目"""
@@ -4601,7 +5279,16 @@ JSON 格式：
                 "max_tokens": 900,
                 "temperature": 0.25,
             }
-            return requests.post(chat_url, headers=headers, json=payload, timeout=45)
+            resp = requests.post(chat_url, headers=headers, json=payload, timeout=45)
+            if resp.status_code == 400:
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = resp.text
+                if llm_temperature_param_error(body):
+                    payload.pop("temperature", None)
+                    return requests.post(chat_url, headers=headers, json=payload, timeout=45)
+            return resp
 
         loop = asyncio.get_running_loop()
         for model in models:
@@ -4632,8 +5319,7 @@ JSON 格式：
                 if not choices:
                     logger.warning("Generate-now LLM inference invalid response: model=%s", model)
                     continue
-                msg = choices[0]["message"]
-                content = (msg.get("content") or msg.get("reasoning_content") or "").strip()
+                content = llm_choice_text(choices[0])
                 parsed = self._parse_generate_now_detail(content, now_str)
                 if parsed:
                     merged = dict(fallback)
@@ -4664,10 +5350,20 @@ JSON 格式：
         """根据今日日程的当前时间点生图 (💭 现在在干嘛)"""
         proc = None
         try:
+            # B1 (2026-06-26): 可选 extra_hint，让聊天生图能在日程活动上叠加主人微调
+            extra_hint = ""
+            try:
+                if request.can_read_body:
+                    body = await request.json()
+                    if isinstance(body, dict):
+                        extra_hint = str(body.get("extra_hint", "") or "").strip()[:200]
+            except Exception:
+                extra_hint = ""
+
             now = datetime.now()
             now_str = now.strftime("%H:%M")
             today_str = now.strftime("%Y-%m-%d")
-            logger.info("Generate now: time=%s, using today's schedule chain", now_str)
+            logger.info("Generate now: time=%s, extra_hint=%r, using today's schedule chain", now_str, extra_hint)
 
             # 1) 读取今日日程，并让 LLM 基于全天计划推断当前具体活动。
             daily = self._today_schedule_entry(today_str)
@@ -4693,6 +5389,11 @@ JSON 格式：
 
             now_detail["time"] = now_str
             now_detail["activity_zh"] = now_activity
+            # B1 (2026-06-26): 把主人微调 hint 叠加进活动与日程时间，影响 prompt/参考图选择
+            if extra_hint:
+                now_activity = self._clean_activity_text(f"{now_activity}，{extra_hint}", max_len=96)
+                now_detail["activity_zh"] = now_activity
+                now_detail["extra_hint"] = extra_hint
             schedule_time = f"{now_str} {now_activity}".strip()
             schedule_detail_json = json.dumps(now_detail, ensure_ascii=False, separators=(",", ":"))
             theme = self._theme_for_schedule_time(now_str)
@@ -4806,6 +5507,9 @@ JSON 格式：
                 child_env_extra["CPA_API_KEY"] = cpa_key
             if gpt_key or cpa_key:
                 child_env_extra["GPT_IMAGE_API_KEY"] = gpt_key or cpa_key
+            gpt_image_endpoints = keys_config.get("gpt_image_endpoints") or []
+            if isinstance(gpt_image_endpoints, list) and gpt_image_endpoints:
+                child_env_extra["GPT_IMAGE_ENDPOINTS"] = json.dumps(gpt_image_endpoints, ensure_ascii=False)
             if cpa_base_url:
                 child_env_extra["CPA_BASE_URL"] = cpa_base_url
             child_env = self._child_env(child_env_extra)
@@ -4883,10 +5587,7 @@ JSON 格式：
             filename = os.path.basename(image_path)
 
             # Parse caption if present
-            caption_text = ""
-            cap_m = re.search(r"CAPTION:(.+)", stdout_text)
-            if cap_m:
-                caption_text = cap_m.group(1).strip()
+            caption_text = self._parse_stdout_caption(stdout_text)
 
             # Update schedule_data.json: set source="web" for this entry
             store = ScheduleStore(self.data_dir)
@@ -4982,13 +5683,27 @@ JSON 格式：
                 else:
                     api_source = "hermes"
             api_caption = self._request_caption(body)
+            api_description = self._request_outfit_description(body)
+            if api_source == "hermes":
+                api_description = await self._normalize_hermes_display_description(
+                    api_description,
+                    user_prompt,
+                    "自定义生图",
+                )
+                if not api_caption:
+                    api_caption = self._fallback_hermes_caption(api_description, user_prompt)
             image_model = self._normalize_image_model_id(body.get("model") or body.get("image_model") or body.get("gpt_model"))
             raw_image_model = str(body.get("model") or body.get("image_model") or body.get("gpt_model") or "").strip()
             if raw_image_model and not image_model and raw_image_model.lower() not in {"default", "auto", "current"}:
                 return web.json_response({"error": "invalid_image_model"}, status=400)
-            entry = await self.on_generate_custom(user_prompt, size, ref_image, shot_type, pure, api_source, api_caption, image_model)
+            entry = await self.on_generate_custom(user_prompt, size, ref_image, shot_type, pure, api_source, api_caption, image_model, api_description)
             if entry and entry.status == "ok":
-                return web.json_response(entry.to_dict())
+                payload = entry.to_dict()
+                try:
+                    payload = self._normalize_entry_display(payload, self._load_image_metadata())
+                except Exception as e:
+                    logger.warning("Normalize custom generate response failed: %s", e)
+                return web.json_response(payload)
             return web.json_response({"error": "generate_failed"}, status=500)
         except Exception as e:
             logger.error(f"Custom generate error: {e}")
@@ -5511,8 +6226,13 @@ JSON 格式：
 
         response["message"] = "更新成功，服务即将重启；本地 API Key、Base URL、appearance、图片和参考图已保留"
         if restart:
-            loop = asyncio.get_running_loop()
-            loop.call_later(1.0, lambda: os.execv(sys.executable, [sys.executable] + sys.argv))
+            scheduled, restart_message = self._schedule_python_restart("safe_update", delay=1.0)
+            response["will_restart"] = bool(scheduled)
+            response["message"] = (
+                "更新成功，服务即将以 Python 模式重启；本地 API Key、Base URL、appearance、图片和参考图已保留"
+                if scheduled
+                else f"更新成功，但未能自动重启：{restart_message}"
+            )
         else:
             response["message"] = "更新成功；本地 API Key、Base URL、appearance、图片和参考图已保留"
         return response, 200
@@ -5585,6 +6305,7 @@ JSON 格式：
         size: str = "",
         ref_image: str = "",
         caption: str = "",
+        display_outfit: str = "",
         output_dir: str = "",
         url_prefix: str = "/images",
         source: str = "hermes_api",
@@ -5645,6 +6366,7 @@ JSON 格式：
             return None
 
         caption = str(caption or "").strip()
+        display_outfit = self._clean_display_description(display_outfit)
 
         meta_entry = {
             "category": category,
@@ -5653,6 +6375,8 @@ JSON 格式：
             "model_name": self._display_model_name(model_name),
             "base_style": base_style,
             "caption": caption,
+            "display_outfit": display_outfit,
+            "outfit_description": display_outfit,
             "size": size or "",
             "created_at": created_at,
             "generation_time": elapsed,
@@ -5670,6 +6394,9 @@ JSON 格式：
             "fallback_from": "",
             "fallback_to": "",
         }
+        selected_reference = self._wardrobe_reference_for_value(ref_image)
+        if selected_reference:
+            meta_entry["selected_reference"] = selected_reference
         try:
             meta_entry["width"], meta_entry["height"] = width, height
             meta_entry["file_size_bytes"] = os.path.getsize(img_path)
@@ -5694,6 +6421,8 @@ JSON 格式：
             "base_style": base_style,
             "model_name": self._display_model_name(model_name),
             "caption": caption,
+            "display_outfit": display_outfit,
+            "outfit_description": display_outfit,
             "prompt_mode": "pure",
             "pure_prompt": True,
             "custom_ref_mode": "reference" if ref_image else "text2img",
@@ -5701,6 +6430,7 @@ JSON 格式：
             "width": width,
             "height": height,
             "file_size_bytes": meta_entry.get("file_size_bytes", 0),
+            "selected_reference": selected_reference,
         }
 
     async def handle_hermes_text_to_image(self, request: web.Request):
@@ -5714,6 +6444,13 @@ JSON 格式：
             engine = str(body.get("engine", "gptimage") or "gptimage").strip().lower()
             size = str(body.get("size", "") or "").strip()
             caption = self._request_caption(body)
+            display_outfit = await self._normalize_hermes_display_description(
+                self._request_outfit_description(body),
+                prompt,
+                "文生图",
+            )
+            if not caption:
+                caption = self._fallback_hermes_caption(display_outfit, prompt)
 
             if engine not in {"gptimage", "gitee"}:
                 return web.json_response({"error": "invalid_engine"}, status=400)
@@ -5721,7 +6458,7 @@ JSON 格式：
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: self._run_hermes_image_generation(engine, prompt, size=size, caption=caption),
+                lambda: self._run_hermes_image_generation(engine, prompt, size=size, caption=caption, display_outfit=display_outfit),
             )
 
             if not result:
@@ -5746,6 +6483,13 @@ JSON 格式：
             engine = str(body.get("engine", "gptimage") or "gptimage").strip().lower()
             size = str(body.get("size", "") or "").strip()
             caption = self._request_caption(body)
+            display_outfit = await self._normalize_hermes_display_description(
+                self._request_outfit_description(body),
+                prompt,
+                "图生图",
+            )
+            if not caption:
+                caption = self._fallback_hermes_caption(display_outfit, prompt)
 
             if engine != "gptimage":
                 return web.json_response({"error": "engine_not_support_img2img"}, status=400)
@@ -5757,7 +6501,7 @@ JSON 格式：
             loop = asyncio.get_running_loop()
             result = await loop.run_in_executor(
                 None,
-                lambda: self._run_hermes_image_generation(engine, prompt, size=size, ref_image=resolved_ref, caption=caption),
+                lambda: self._run_hermes_image_generation(engine, prompt, size=size, ref_image=resolved_ref, caption=caption, display_outfit=display_outfit),
             )
 
             if not result:

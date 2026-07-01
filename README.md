@@ -1,6 +1,6 @@
 # 🎀 Portrait Gallery
 
-当前版本：**v1.2.0**
+当前版本：**v1.2.4**
 
 > AI 穿搭生图 & 个人画廊系统 —— 让 AI 每天为你量身定制穿搭方案并自动生成写真
 
@@ -74,53 +74,21 @@ cd app
 python3 main.py
 ```
 
-#### 方式二：launchd 原生运行（macOS 推荐）
+#### 方式二：Python 后台运行（本机推荐）
 
-1. 创建 plist 文件：
-
-```xml
-<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-    <key>Label</key>
-    <string>com.hermes.portrait-gallery</string>
-    <key>ProgramArguments</key>
-    <array>
-        <string>/usr/bin/python3</string>
-        <string>/path/to/portrait-gallery/app/main.py</string>
-    </array>
-    <key>WorkingDirectory</key>
-    <string>/path/to/portrait-gallery</string>
-    <key>RunAtLoad</key>
-    <true/>
-    <key>KeepAlive</key>
-    <true/>
-    <key>StandardOutPath</key>
-    <string>/path/to/portrait-gallery/logs/launcher.log</string>
-    <key>StandardErrorPath</key>
-    <string>/path/to/portrait-gallery/logs/launcher.log</string>
-</dict>
-</plist>
-```
-
-2. 加载服务：
+`app/run_launch.sh` 会自动定位项目目录、优先使用项目 `.venv`，并设置
+`CONFIG_PATH`、`GALLERY_DATA_DIR` 等运行环境：
 
 ```bash
-# 创建日志目录
-mkdir -p /path/to/portrait-gallery/logs
-
-# 加载服务
-launchctl load ~/Library/LaunchAgents/com.hermes.portrait-gallery.plist
-
-# 启动服务
-launchctl start com.hermes.portrait-gallery
-
-# 查看日志
-tail -f /path/to/portrait-gallery/logs/gallery.log
+nohup ./app/run_launch.sh >/tmp/portrait_gallery_manual_start.log 2>&1 &
+curl http://localhost:18889/api/health
 ```
 
-应用会追加写入 `logs/gallery.log`，重启不会覆盖；日志按天轮转，并自动清理 3 天前的轮转文件。`launcher.log` 只保留启动器自身输出，避免和应用日志重复写入。
+服务启动后，网页设置里的“重启服务”按钮会调用 `/api/restart`，
+由当前 Python 服务拉起新的 Python 进程并退出旧进程；不会拉取代码，
+也不会修改本地配置、API Key、图片或参考图。
+
+应用会追加写入 `logs/gallery.log`，重启不会覆盖；日志按天轮转，并自动清理 3 天前的轮转文件。
 
 ## 📐 架构
 
@@ -300,6 +268,36 @@ Hermes 调用 `/api/generate-custom`、`/api/hermes/text-to-image` 或 `/api/her
 - **⚙️ 设置** — Web UI 管理 API 密钥
 
 ## 🧾 Release Notes
+
+### v1.2.4
+
+- 每日日程生成改为凌晨 `03:00-06:00` 随机窗口执行；窗口内生成失败会自动重试，过了窗口不再白天补跑。
+- `03:00-05:59` 作为日程生成静默时段，不安排也不执行自动生图；日程生图时间会避开整点并自然上下浮动。
+- 设置页移除固定的 GitHub Release API URL 输入项，检查更新仍由后端使用当前仓库固定地址。
+
+### v1.2.3
+
+- 设置页的 GitHub Release API URL 改为当前仓库固定值，不再要求用户手动填写，旧本地覆盖会在保存设置时自动清理。
+- 检查更新默认使用 `https://api.github.com/repos/i-kirito/portrait-gallery/releases/latest`，仍保留环境变量或配置覆盖能力，便于特殊部署。
+- 默认画质提示词改为更自然的手机随拍风格，减少过度精修、塑料皮肤和 AI 感。
+
+### v1.2.2
+
+- 强化 LLM 日程 JSON 输出链路：增加 strict JSON 输出协议、JSON 修复重试和 schedule_details 结构兼容，避免模型输出说明文字时直接失败。
+- 日程生成恢复 full → compact → emergency 逐级降级，保留历史穿搭、收藏/不喜欢反馈和完整人设口吻，只在失败后使用极简 prompt。
+- Hermes/API 生图支持写入调用方文案和中文穿搭展示描述；无中文描述时短超时尝试 LLM 压缩，失败立即使用本地 fallback，不阻塞生图链路。
+- 自定义生图和 Hermes 生图元数据补充 `display_outfit` / `outfit_description`，画廊详情优先展示中文穿搭描述和衣柜参考标签。
+- 运行诊断日志隐藏已被后续成功覆盖的旧 LLM 原始错误，并保留真实请求超时/连接失败原因。
+- 衣柜页优化为一行 4 套，衣柜参考只在点击“用它生图”后进入自定义生图参考区。
+- 小心思 caption 统一选择可用文案，避免单字/空文案覆盖 gallery 已有内容。
+
+### v1.2.1
+
+- 日程生成失败时不再把本地 fallback 伪装成真实日程，避免 LLM 不可用时误触发定时/即时生图。
+- 统一日程可用性判断：刷新、今日生图、generate-now 和子进程生图都会排除 `source=fallback` 的历史脏数据。
+- 修复发色优先链路：appearance 发色优先，日程发型只决定发型/发饰，并收紧 `light/dark` 发色清洗误伤。
+- 设置页重启回归 Python 模式，`app/run_launch.sh` 会自动加载本地 `.venv`、配置和数据目录，重启不修改本地 Key/URL。
+- 模型测试增加多次轮询和 `temperature` 不兼容自动重试，便于 AxonHub/第三方 OpenAI-compatible 模型排查。
 
 ### v1.2.0
 

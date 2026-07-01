@@ -298,6 +298,16 @@ textarea:focus-visible,
   color: #333;
   background: #fafafa;
 }
+.sk-field input[readonly] {
+  color: #666;
+  background: #f4f4f4;
+  cursor: default;
+}
+.sk-field input[readonly]:focus {
+  border-color: #e0e0e0;
+  box-shadow: none;
+  background: #f4f4f4;
+}
 .sk-field textarea {
   width: 100%;
   padding: 10px 14px;
@@ -825,14 +835,16 @@ textarea:focus-visible,
 .sk-footer-main {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 12px;
+  align-items: end;
+  gap: 16px;
   width: 100%;
 }
 .sk-actions {
   display: flex;
   gap: 10px;
   justify-content: flex-end;
+  align-items: center;
+  padding-bottom: 1px;
 }
 .sk-actions .btn {
   padding: 10px 18px;
@@ -847,19 +859,36 @@ textarea:focus-visible,
 }
 .sk-actions .btn-secondary:hover { background: #eee; }
 .sk-update-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(2, max-content);
+  grid-template-areas:
+    "version version"
+    "check restart";
   align-items: center;
-  gap: 8px;
-  flex-wrap: wrap;
+  justify-content: start;
+  gap: 7px 8px;
   min-width: 0;
+  max-width: 100%;
 }
 .sk-update-row .btn {
-  padding: 10px 12px;
-  min-width: 104px;
+  padding: 9px 12px;
+  min-width: 100px;
+  min-height: 36px;
+  font-size: 13px;
+  border-radius: 999px;
+}
+#checkUpdateBtn { grid-area: check; }
+#restartServiceBtn { grid-area: restart; }
+.sk-update-row .btn-secondary {
+  background: #eef7ff;
+  border-color: #d7e9f8;
+  color: #486274;
 }
 .sk-version-text {
+  grid-area: version;
   font-size: 12px;
-  color: #999;
+  line-height: 1.2;
+  color: #8b94a3;
   white-space: nowrap;
 }
 .sk-update-result {
@@ -921,6 +950,13 @@ textarea:focus-visible,
   .sk-actions,
   .sk-update-row {
     width: 100%;
+  }
+  .sk-update-row {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .sk-update-row .btn {
+    width: 100%;
+    min-width: 0;
   }
   .sk-actions .btn { flex: 1; }
   .sk-segmented,
@@ -1198,7 +1234,7 @@ textarea:focus-visible,
 
 .wardrobe-section {
   display: block;
-  max-width: 1040px;
+  max-width: 1280px;
   margin: 0 auto;
 }
 .wardrobe-section.hidden { display: none; }
@@ -1230,7 +1266,7 @@ textarea:focus-visible,
 }
 .wardrobe-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(260px, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 12px;
 }
 .wardrobe-card {
@@ -1308,22 +1344,28 @@ textarea:focus-visible,
 }
 .wardrobe-actions {
   display: flex;
-  flex-wrap: wrap;
-  gap: 8px;
-  justify-content: flex-end;
+  flex-wrap: nowrap;
+  gap: 6px;
+  justify-content: stretch;
   margin-top: auto;
   padding-top: 3px;
 }
 .wardrobe-action-btn,
 .wardrobe-remove-btn {
+  flex: 1 1 0;
+  min-width: 0;
   min-height: 28px;
-  padding: 0 11px;
+  padding: 0 5px;
   border: 1px solid rgba(233,30,99,0.2);
   border-radius: 999px;
   background: #fff7fb;
   color: #c2185b;
-  font-size: 11px;
+  font-size: 10px;
   font-weight: 800;
+  line-height: 1;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
   cursor: pointer;
 }
 .wardrobe-action-btn {
@@ -2403,6 +2445,7 @@ textarea:focus-visible,
     flex: 1 1 0;
     padding-inline: 12px;
   }
+  .wardrobe-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (max-width: 700px) {
   .header {
@@ -2897,17 +2940,47 @@ textarea:focus-visible,
 .prompt-close:hover { background: #f5f0ff; color: #7c3aed; }
 .prompt-body { flex: 1; overflow-y: auto; padding: 16px 20px; }
 .prompt-body pre { margin: 0; white-space: pre-wrap; word-break: break-all; font-family: 'SF Mono', 'Menlo', monospace; font-size: 12px; line-height: 1.6; color: #444; background: #faf7ff; border-radius: 10px; padding: 12px; }
-.prompt-footer { padding: 12px 20px; border-top: 1px solid #f0e4f4; display: flex; justify-content: flex-end; }
+.prompt-footer { padding: 12px 20px; border-top: 1px solid #f0e4f4; display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
 .prompt-copy-btn { background: linear-gradient(135deg, #c084fc, #818cf8); color: #fff; border: none; border-radius: 10px; padding: 8px 20px; font-size: 13px; font-weight: 600; cursor: pointer; transition: all 0.2s; box-shadow: 0 4px 12px rgba(192,132,252,0.3); }
 .prompt-copy-btn:hover { transform: translateY(-2px); box-shadow: 0 6px 20px rgba(192,132,252,0.4); }
-.log-card { width: min(980px, calc(100vw - 32px)); max-height: 84vh; }
-.log-body pre { min-height: 56vh; max-height: 64vh; overflow: auto; white-space: pre-wrap; word-break: break-word; background: #111827; color: #d1fae5; border: 1px solid #263244; }
+.log-card { width: min(980px, calc(100vw - 32px)); max-height: min(84vh, 860px); }
+.log-body { padding-bottom: 10px; }
+.log-body pre { min-height: clamp(320px, 56vh, 680px); max-height: min(64vh, 680px); overflow: auto; white-space: pre-wrap; word-break: break-word; background: #111827; color: #d1fae5; border: 1px solid #263244; }
 .log-body pre .log-diagnostic { color: #d1fae5; }
 .log-body pre .log-raw-title { color: #fbbf24; font-weight: 800; }
 .log-body pre .log-raw-block { color: #fecaca; }
-.log-status { margin-right: auto; color: #8b5cf6; font-size: 12px; font-weight: 700; }
-.log-toggle { display: inline-flex; align-items: center; gap: 6px; margin-right: 10px; color: #6b7280; font-size: 12px; font-weight: 700; user-select: none; }
+.log-footer { justify-content: space-between; gap: 14px; padding-top: 10px; padding-bottom: 14px; }
+.log-status { flex: 1 1 360px; min-width: 0; color: #8b5cf6; font-size: 12px; font-weight: 700; line-height: 1.35; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.log-controls { display: flex; align-items: center; justify-content: flex-end; gap: 10px; flex: 0 0 auto; margin-left: auto; }
+.log-toggle { display: inline-flex; align-items: center; gap: 6px; color: #6b7280; font-size: 12px; font-weight: 700; white-space: nowrap; user-select: none; }
 .log-toggle input { accent-color: #8b5cf6; }
+.log-footer .prompt-copy-btn { display: inline-flex; align-items: center; justify-content: center; min-width: 64px; height: 34px; padding: 0 16px; border-radius: 10px; }
+@media (max-width: 640px) {
+  .prompt-overlay { padding: 14px; box-sizing: border-box; }
+  .prompt-card { width: min(480px, calc(100vw - 28px)); max-height: calc(100vh - 28px); }
+  .log-card { width: calc(100vw - 28px); max-height: calc(100vh - 28px); }
+  .prompt-header { padding: 12px 14px; }
+  .prompt-body { padding: 12px 14px; }
+  .log-body pre { min-height: 48vh; max-height: 58vh; }
+  .log-footer { align-items: stretch; flex-direction: column; padding: 10px 14px 14px; }
+  .log-status { flex-basis: auto; white-space: normal; }
+  .log-controls { width: 100%; margin-left: 0; display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .log-toggle { grid-column: 1 / -1; justify-content: flex-end; }
+  .log-footer .prompt-copy-btn { width: 100%; min-width: 0; }
+}
+.sk-endpoints-list { display: flex; flex-direction: column; gap: 8px; margin-bottom: 8px; }
+.sk-endpoint-row { display: grid; grid-template-columns: 96px minmax(0, 1fr) minmax(0, 1fr) auto; gap: 7px; align-items: center; }
+.sk-endpoint-row input { width: 100%; min-width: 0; padding: 7px 9px; border: 1px solid #eadfec; border-radius: 8px; font-size: 13px; box-sizing: border-box; }
+.sk-endpoint-row input[type="password"] { font-family: 'SF Mono', 'Menlo', monospace; }
+.sk-endpoint-del-btn, .sk-endpoint-add-btn { height: 32px; border-radius: 8px; cursor: pointer; font-size: 12px; font-weight: 800; }
+.sk-endpoint-del-btn { border: 1px solid #ffd1dc; background: #fff6f9; color: #d81b60; padding: 0 11px; white-space: nowrap; }
+.sk-endpoint-del-btn:hover { background: #ffe8f0; }
+.sk-endpoint-add-btn { width: 100%; border: 1px dashed #d6c5dd; background: #fbf7fd; color: #7a5b87; }
+.sk-endpoint-add-btn:hover { border-color: #d83b8c; color: #d83b8c; }
+@media (max-width: 720px) {
+  .sk-endpoint-row { grid-template-columns: 1fr; }
+  .sk-endpoint-del-btn { width: 100%; }
+}
 
 </style>
 </head>
@@ -2992,7 +3065,7 @@ textarea:focus-visible,
 
 <div class="header">
   <div class="header-left">
-    <h1 style="user-select:none;"><span class="app-logo" id="appHeaderLogo" aria-hidden="true">🌸</span><span id="appHeaderTitle">雪枫的穿搭画廊</span> <span class="version-tag" id="versionTag">v1.2.0</span></h1>
+    <h1 style="user-select:none;"><span class="app-logo" id="appHeaderLogo" aria-hidden="true">🌸</span><span id="appHeaderTitle">雪枫的穿搭画廊</span> <span class="version-tag" id="versionTag">v1.2.4</span></h1>
   </div>
   <div class="tabs">
     <button class="tab" data-tab="gallery" onclick="switchTab('gallery')" ondblclick="showUnfavoriteGallery(event)"><span class="tab-label">✨ 全部</span><span class="tab-badge" id="badge-all">0</span></button>
@@ -3136,6 +3209,18 @@ textarea:focus-visible,
       <div class="sk-status" id="skPushStatus">加载中...</div>
     </div>
     <div class="sk-field">
+      <label for="skHermesCliPath">Hermes CLI 路径</label>
+      <div class="sk-desc">Hermes CLI 可执行文件路径；留空则自动从 PATH 或默认安装位置查找</div>
+      <input type="text" id="skHermesCliPath" placeholder="留空自动查找；例如 ~/.hermes/hermes-agent/venv/bin/hermes">
+      <div class="sk-status" id="skHermesCliStatus">加载中...</div>
+    </div>
+    <div class="sk-field">
+      <label for="skOpenclawCliPath">OpenClaw CLI 路径</label>
+      <div class="sk-desc">OpenClaw CLI 可执行文件路径；留空则自动从 PATH 查找</div>
+      <input type="text" id="skOpenclawCliPath" placeholder="留空自动查找；例如 /usr/local/bin/openclaw">
+      <div class="sk-status" id="skOpenclawCliStatus">加载中...</div>
+    </div>
+    <div class="sk-field">
       <label for="skGiteeUrl">Gitee API URL</label>
       <div class="sk-desc">Gitee 生图接口地址，必须填写完整接口地址</div>
       <input type="text" id="skGiteeUrl" placeholder="必填：填写你的 Gitee 生图接口地址">
@@ -3175,6 +3260,13 @@ textarea:focus-visible,
       <div class="sk-status" id="skGptStatus">加载中...</div>
     </div>
     <div class="sk-field">
+      <label>GPT Image 多端点（可选）</label>
+      <div class="sk-desc">填写后优先使用第一条完整端点；每条都必须同时包含 Base URL 和 API Key</div>
+      <div id="skGptEndpointsList" class="sk-endpoints-list"></div>
+      <button type="button" class="sk-endpoint-add-btn" onclick="addGptEndpointRow()">+ 添加端点</button>
+      <div class="sk-status" id="skGptEndpointsStatus">加载中...</div>
+    </div>
+    <div class="sk-field">
       <label for="skCpaUrl">CPA Base URL</label>
       <div class="sk-desc">Gemini 生图和 LLM 调度使用，必须填写 CPA 的 /v1 地址</div>
       <input type="text" id="skCpaUrl" placeholder="必填：填写你的 CPA /v1 地址">
@@ -3185,12 +3277,6 @@ textarea:focus-visible,
       <div class="sk-desc">CPA 认证密钥，必须填写</div>
       <input type="password" id="skCpaKey" placeholder="输入新密钥（留空则不修改）">
       <div class="sk-status" id="skCpaKeyStatus">加载中...</div>
-    </div>
-    <div class="sk-field">
-      <label for="skGithubApi">GitHub Release API URL</label>
-      <div class="sk-desc">检查更新和在线更新使用，必须填写 releases/latest API 地址</div>
-      <input type="text" id="skGithubApi" placeholder="必填：填写仓库 releases/latest API 地址">
-      <div class="sk-status" id="skGithubApiStatus">加载中...</div>
     </div>
     <div class="sk-field">
       <label for="skGithubProxy">GitHub API 代理</label>
@@ -3237,7 +3323,8 @@ textarea:focus-visible,
       <div class="sk-footer-main">
         <div class="sk-update-row">
           <button class="btn btn-secondary" id="checkUpdateBtn" onclick="checkUpdate()">🔍 检查更新</button>
-          <span class="sk-version-text">当前版本 <span id="settingsVersion">v1.2.0</span></span>
+          <button class="btn btn-secondary" id="restartServiceBtn" onclick="restartService()">🔄 重启服务</button>
+          <span class="sk-version-text">当前版本 <span id="settingsVersion">v1.2.4</span></span>
         </div>
         <div class="sk-actions">
           <button class="btn btn-secondary" onclick="closeSettings()">关闭</button>
@@ -3869,7 +3956,17 @@ function extractOutfitText(outfit) {
 
 function renderCaptionLinks(caption) {
   if (!caption) return "";
-  return String(caption).replace(/#([^\s#]+)/g, '<a class="tag-link" href="#" onclick="filterByTag(\'$1\'); return false;">' + '#' + '$1</a>');
+  const raw = String(caption);
+  let html = "";
+  let lastIndex = 0;
+  raw.replace(/#([^\s#]+)/g, function(match, tag, offset) {
+    html += escapeHtml(raw.slice(lastIndex, offset));
+    html += '<a class="tag-link" href="#" onclick="filterByTag(' + jsStringArg(tag) + '); return false;">' + escapeHtml(match) + '</a>';
+    lastIndex = offset + match.length;
+    return match;
+  });
+  html += escapeHtml(raw.slice(lastIndex));
+  return html;
 }
 
 function renderThoughtBlock(caption, className = "tc-thought") {
@@ -3994,6 +4091,11 @@ function renderToday() {
   let html = "";
   for (const today of photos) {
     const timeLabel = today.time || "";
+    const todayImageFilename = String(today.image_filename || "");
+    const todayImageFilenameAttr = escapeAttr(todayImageFilename);
+    const todayImageSrcArg = jsStringArg("/images/" + todayImageFilename);
+    const todayImageArg = jsStringArg(todayImageFilename);
+    const todayDeleteArg = jsStringArg(todayImageFilename || today.date || "");
 
     // Date + weekday
     const d = new Date((today.date || todayStr) + "T00:00:00+08:00");
@@ -4015,36 +4117,37 @@ function renderToday() {
       if (slots.length) {
         schedHtml = slots.map(slot => {
           const m = slot.match(/^(\d{1,2}:\d{2})\s*(.*)/);
-          if (m) return `<div class="sched-item"><span class="sched-label">${m[1]}</span><span class="sched-text">${m[2].trim()}</span></div>`;
-          return `<div class="sched-item"><span class="sched-text">${slot}</span></div>`;
+          if (m) return `<div class="sched-item"><span class="sched-label">${escapeHtml(m[1])}</span><span class="sched-text">${escapeHtml(m[2].trim())}</span></div>`;
+          return `<div class="sched-item"><span class="sched-text">${escapeHtml(slot)}</span></div>`;
         }).join('');
       }
     }
 
     const captionHtml = renderThoughtBlock(today.caption, "modal-caption tc-thought");
-    const metaHtml = `${today.model_name ? `<span class="meta-tag">🤖 ${today.model_name}</span>` : ""}${displayReferenceMeta(today) ? `<span class="meta-tag">${displayReferenceMeta(today)}</span>` : ""}${displayImageSizeMeta(today) ? `<span class="meta-tag">${displayImageSizeMeta(today)}</span>` : ""}${displayFileSizeMeta(today) ? `<span class="meta-tag">${displayFileSizeMeta(today)}</span>` : ""}${displayGenerationTimeMeta(today) ? `<span class="meta-tag">${displayGenerationTimeMeta(today)}</span>` : ""}${renderRerollButton(today)}`;
+    const todayStyle = displayOutfitStyle(today);
+    const metaHtml = `${today.model_name ? `<span class="meta-tag">🤖 ${escapeHtml(today.model_name)}</span>` : ""}${displayReferenceMeta(today) ? `<span class="meta-tag">${escapeHtml(displayReferenceMeta(today))}</span>` : ""}${displayImageSizeMeta(today) ? `<span class="meta-tag">${escapeHtml(displayImageSizeMeta(today))}</span>` : ""}${displayFileSizeMeta(today) ? `<span class="meta-tag">${escapeHtml(displayFileSizeMeta(today))}</span>` : ""}${displayGenerationTimeMeta(today) ? `<span class="meta-tag">${escapeHtml(displayGenerationTimeMeta(today))}</span>` : ""}${renderRerollButton(today)}`;
 
     html += `
-      <div class="today-compact" data-gallery-img="${escapeAttr(today.image_filename || '')}" style="cursor:default;">
+      <div class="today-compact" data-gallery-img="${todayImageFilenameAttr}" style="cursor:default;">
         <div class="tc-image">
-          <img src="/images/${today.image_filename}" alt="今日穿搭" decoding="async" onclick="openViewer('/images/${today.image_filename}')" style="cursor:pointer;">
+          <img src="/images/${todayImageFilenameAttr}" alt="今日穿搭" decoding="async" onclick="openViewer(${todayImageSrcArg})" style="cursor:pointer;">
         </div>
         <div class="modal-info today-card-info">
           <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px;">
-            <span class="modal-date" style="margin:0;padding:0;background:none;">${dateText} ${timeLabel}</span>
-            ${displayOutfitStyle(today) ? `<span class="modal-style" onclick="event.stopPropagation();filterByTag('${displayOutfitStyle(today)}');">${displayOutfitStyle(today)}</span>` : ""}
+            <span class="modal-date" style="margin:0;padding:0;background:none;">${escapeHtml(dateText)} ${escapeHtml(timeLabel)}</span>
+            ${todayStyle ? `<span class="modal-style" onclick="event.stopPropagation();filterByTag(${jsStringArg(todayStyle)});">${escapeHtml(todayStyle)}</span>` : ""}
           </div>
           <div>
             <span class="modal-meta" style="margin:0;padding:0;background:none;">${metaHtml}</span>
           </div>
-          <div class="modal-outfit">${outfitText ? `<span class="outfit-label">穿搭</span><span class="outfit-divider">|</span><span class="outfit-text">${outfitText}</span>` : '--'}</div>
+          <div class="modal-outfit">${outfitText ? `<span class="outfit-label">穿搭</span><span class="outfit-divider">|</span><span class="outfit-text">${escapeHtml(outfitText)}</span>` : '--'}</div>
           ${schedHtml ? `<div class="modal-schedule">${schedHtml}</div>` : ""}
           ${captionHtml}
           <div class="modal-actions" onclick="event.stopPropagation()">
-            <button class="mbtn" onclick="event.stopPropagation();toggleFavorite('${today.image_filename}');"><i class="${today.favorite ? 'fa-solid' : 'fa-regular'} fa-heart btn-icon" aria-hidden="true"></i> 收藏</button>
-            <button class="mbtn" onclick="event.stopPropagation();shareImage('${today.image_filename}');"><i class="fa-solid fa-share-nodes btn-icon" aria-hidden="true"></i> 分享</button>
+            <button class="mbtn" onclick="event.stopPropagation();toggleFavorite(${todayImageArg});"><i class="${today.favorite ? 'fa-solid' : 'fa-regular'} fa-heart btn-icon" aria-hidden="true"></i> 收藏</button>
+            <button class="mbtn" onclick="event.stopPropagation();shareImage(${todayImageArg});"><i class="fa-solid fa-share-nodes btn-icon" aria-hidden="true"></i> 分享</button>
             <button class="mbtn" onclick="event.stopPropagation();showPrompt(this)" data-prompt="${encodeURIComponent(today.prompt || '')}"><i class="fa-regular fa-pen-to-square btn-icon" aria-hidden="true"></i> 提示词</button>
-            <button class="mbtn danger" onclick="event.stopPropagation();deleteImage('${today.image_filename}', event);"><i class="fa-regular fa-trash-can btn-icon" aria-hidden="true"></i> 删除</button>
+            <button class="mbtn danger" onclick="event.stopPropagation();deleteImage(${todayDeleteArg}, event);"><i class="fa-regular fa-trash-can btn-icon" aria-hidden="true"></i> 删除</button>
           </div>
         </div>
       </div>`;
@@ -4160,14 +4263,14 @@ function renderGallery() {
     if (styles.length) {
       const stylePills = styles.map(s => {
         const active = currentTagFilter && currentTagFilter.toLowerCase() === s.toLowerCase();
-        return `<button class="style-pill${active ? ' active' : ''}" onclick="filterByTag('${s}')">${s}</button>`;
+        return `<button class="style-pill${active ? ' active' : ''}" onclick="filterByTag(${jsStringArg(s)})">${escapeHtml(s)}</button>`;
       }).join('');
       const clearBtn = currentTagFilter ? `<button class="style-pill clear" onclick="clearFilter()">✕ 清除</button>` : '';
       headerHtml += `<div class="style-filter-bar">${stylePills}${clearBtn}</div>`;
     }
   }
   if (currentTagFilter) {
-    headerHtml += `<div class="filter-bar">🏷️ 筛选: #${currentTagFilter} <button class="filter-clear" onclick="clearFilter()">✕ 清除</button></div>`;
+    headerHtml += `<div class="filter-bar">🏷️ 筛选: #${escapeHtml(currentTagFilter)} <button class="filter-clear" onclick="clearFilter()">✕ 清除</button></div>`;
   }
   
   if (!filtered.length) {
@@ -4178,20 +4281,25 @@ function renderGallery() {
   content.innerHTML = headerHtml + (showTodayOnly
     ? `<div class="gallery-list">${
         filtered.map(e => {
+          const safeImageFilename = escapeAttr(e.image_filename || "");
+          const imageFilenameArg = jsStringArg(e.image_filename || "");
+          const imageSrcArg = jsStringArg("/images/" + (e.image_filename || ""));
+          const deleteArg = jsStringArg(e.image_filename || e.date || "");
+          const displayStyle = displayOutfitStyle(e);
           const imgHtml = e.image_filename
-            ? `<img src="/images/${e.image_filename}" alt="${e.date}" loading="lazy" decoding="async">`
+            ? `<img src="/images/${safeImageFilename}" alt="${escapeAttr(e.date || '')}" loading="lazy" decoding="async">`
             : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#ddd;font-size:32px;">📸</div>`;
           const timeDisplay = e.time ? e.time : "";
           let metaHtml = "";
-          if (e.model_name) metaHtml += `<span class="tc-meta-tag">🤖 ${e.model_name}</span>`;
+          if (e.model_name) metaHtml += `<span class="tc-meta-tag">🤖 ${escapeHtml(e.model_name)}</span>`;
           const referenceLabel = displayReferenceMeta(e);
-          if (referenceLabel) metaHtml += `<span class="tc-meta-tag">${referenceLabel}</span>`;
+          if (referenceLabel) metaHtml += `<span class="tc-meta-tag">${escapeHtml(referenceLabel)}</span>`;
           const sizeLabel = displayImageSizeMeta(e);
-          if (sizeLabel) metaHtml += `<span class="tc-meta-tag">${sizeLabel}</span>`;
+          if (sizeLabel) metaHtml += `<span class="tc-meta-tag">${escapeHtml(sizeLabel)}</span>`;
           const fileSizeLabel = displayFileSizeMeta(e);
-          if (fileSizeLabel) metaHtml += `<span class="tc-meta-tag">${fileSizeLabel}</span>`;
+          if (fileSizeLabel) metaHtml += `<span class="tc-meta-tag">${escapeHtml(fileSizeLabel)}</span>`;
           const generationTimeLabel = displayGenerationTimeMeta(e);
-          if (generationTimeLabel) metaHtml += `<span class="tc-meta-tag">${generationTimeLabel}</span>`;
+          if (generationTimeLabel) metaHtml += `<span class="tc-meta-tag">${escapeHtml(generationTimeLabel)}</span>`;
           metaHtml += renderRerollButton(e);
           // Period row: show matching schedule period or fallback to time
           let periodHtml = '';
@@ -4199,30 +4307,30 @@ function renderGallery() {
             const pLabel = getPeriodFromTime(e.time);
             const pText = periodMap[pLabel];
             if (pText) {
-              periodHtml = `<div class="tc-period"><span class="tc-period-label">💫 ${pLabel}</span><span class="tc-period-text">${pText}</span></div>`;
+              periodHtml = `<div class="tc-period"><span class="tc-period-label">💫 ${escapeHtml(pLabel)}</span><span class="tc-period-text">${escapeHtml(pText)}</span></div>`;
             } else if (e.time) {
-              periodHtml = `<div class="tc-period tc-period-time">⏰ ${e.time}</div>`;
+              periodHtml = `<div class="tc-period tc-period-time">⏰ ${escapeHtml(e.time)}</div>`;
             }
           }
           return `
-            <div class="today-compact" data-gallery-img="${escapeAttr(e.image_filename || '')}">
-              <div class="tc-image" onclick="event.stopPropagation();openViewer('/images/${e.image_filename}')" style="cursor:zoom-in;">
+            <div class="today-compact" data-gallery-img="${safeImageFilename}">
+              <div class="tc-image" onclick="event.stopPropagation();openViewer(${imageSrcArg})" style="cursor:zoom-in;">
                 ${imgHtml}
               </div>
               <div class="tc-info">
                 <div class="tc-top">
-                  <span class="tc-date">${formatDate(e.date)}${timeDisplay ? ' ' + timeDisplay : ''}</span>
-                  ${displayOutfitStyle(e) ? `<span class="tc-style" onclick="event.stopPropagation();filterByTag('${displayOutfitStyle(e)}')">${displayOutfitStyle(e)}</span>` : ''}
+                  <span class="tc-date">${escapeHtml(formatDate(e.date))}${timeDisplay ? ' ' + escapeHtml(timeDisplay) : ''}</span>
+                  ${displayStyle ? `<span class="tc-style" onclick="event.stopPropagation();filterByTag(${jsStringArg(displayStyle)})">${escapeHtml(displayStyle)}</span>` : ''}
                   ${metaHtml ? `<div class="tc-meta">${metaHtml}</div>` : ''}
                 </div>
-                <div class="tc-outfit">${e.outfit || '--'}</div>
+                <div class="tc-outfit">${e.outfit ? escapeHtml(e.outfit) : '--'}</div>
                 ${renderThoughtBlock(e.caption)}
                 ${periodHtml}
                 <div class="tc-actions">
-                  <button class="tc-btn ${e.favorite ? 'liked' : ''}" onclick="toggleFavorite('${e.image_filename}', event)" data-img="${e.image_filename}"><i class="${e.favorite ? 'fa-solid' : 'fa-regular'} fa-heart btn-icon" aria-hidden="true"></i> 收藏</button>
-                  <button class="tc-btn" onclick="shareImage('${e.image_filename}', event)"><i class="fa-solid fa-share-nodes btn-icon" aria-hidden="true"></i> 分享</button>
+                  <button class="tc-btn ${e.favorite ? 'liked' : ''}" onclick="toggleFavorite(${imageFilenameArg}, event)" data-img="${safeImageFilename}"><i class="${e.favorite ? 'fa-solid' : 'fa-regular'} fa-heart btn-icon" aria-hidden="true"></i> 收藏</button>
+                  <button class="tc-btn" onclick="shareImage(${imageFilenameArg}, event)"><i class="fa-solid fa-share-nodes btn-icon" aria-hidden="true"></i> 分享</button>
                   <button class="tc-btn" onclick="showPrompt(this)" data-prompt="${encodeURIComponent(e.prompt || '')}"><i class="fa-regular fa-pen-to-square btn-icon" aria-hidden="true"></i> 提示词</button>
-                  <button class="tc-btn danger" onclick="deleteImage('${e.image_filename || e.date}', event)"><i class="fa-regular fa-trash-can btn-icon" aria-hidden="true"></i> 删除</button>
+                  <button class="tc-btn danger" onclick="deleteImage(${deleteArg}, event)"><i class="fa-regular fa-trash-can btn-icon" aria-hidden="true"></i> 删除</button>
                 </div>
               </div>
             </div>`;
@@ -4230,33 +4338,37 @@ function renderGallery() {
     }</div>`
     : `<div class="gallery-grid">${
         filtered.map(e => {
+          const imageFilename = String(e.image_filename || "");
+          const imageFilenameAttr = escapeAttr(imageFilename);
+          const imageFilenameArg = jsStringArg(imageFilename);
+          const deleteArg = jsStringArg(imageFilename || e.date || "");
           const imgHtml = e.image_filename
-            ? `<img src="/images/${e.image_filename}" alt="${e.date}" loading="lazy" decoding="async">`
+            ? `<img src="/images/${imageFilenameAttr}" alt="${escapeAttr(e.date || '')}" loading="lazy" decoding="async">`
             : `<div class="img-placeholder">📸</div>`;
           const displayStyle = displayOutfitStyle(e);
-          const styleTag = displayStyle ? `<span class="card-style-tag" onclick="event.stopPropagation();filterByTag('${displayStyle}');">${displayStyle}</span>` : "";
+          const styleTag = displayStyle ? `<span class="card-style-tag" onclick="event.stopPropagation();filterByTag(${jsStringArg(displayStyle)});">${escapeHtml(displayStyle)}</span>` : "";
           const timeDisplay = e.time ? e.time : "";
           let metaHtml = "";
-          if (e.model_name) metaHtml += `<span class="meta-tag meta-model">🤖 ${e.model_name}</span>`;
+          if (e.model_name) metaHtml += `<span class="meta-tag meta-model">🤖 ${escapeHtml(e.model_name)}</span>`;
           const referenceLabel = displayReferenceMeta(e);
-          if (referenceLabel) metaHtml += `<span class="meta-tag meta-ref">${referenceLabel}</span>`;
+          if (referenceLabel) metaHtml += `<span class="meta-tag meta-ref">${escapeHtml(referenceLabel)}</span>`;
           return `
-            <div class="gallery-card" data-gallery-img="${escapeAttr(e.image_filename || '')}" onclick="event.stopPropagation();openModal(allEntries.find(x=>x.image_filename==='${e.image_filename}'))">
+            <div class="gallery-card" data-gallery-img="${imageFilenameAttr}" onclick="event.stopPropagation();openModal(allEntries.find(x=>x.image_filename===${imageFilenameArg}))">
               <div class="card-img-wrap">
                 ${imgHtml}
-                <span class="card-date-tag">${shortDate(e.date)}</span>
+                <span class="card-date-tag">${escapeHtml(shortDate(e.date))}</span>
                 ${styleTag}
               </div>
               <div class="card-body">
                 <div class="card-row1">
-                  <span class="date">${formatDate(e.date)}</span>
-                  ${timeDisplay ? `<span class="time">${timeDisplay}</span>` : ''}
+                  <span class="date">${escapeHtml(formatDate(e.date))}</span>
+                  ${timeDisplay ? `<span class="time">${escapeHtml(timeDisplay)}</span>` : ''}
                 </div>
                 ${metaHtml ? `<div class="card-meta">${metaHtml}</div>` : ''}
                 <div class="card-actions">
-                  <button class="ca-btn ${e.favorite ? 'liked' : ''}" aria-label="${e.favorite ? '取消收藏' : '收藏'}" onclick="event.stopPropagation();toggleFavorite('${e.image_filename}', event)" data-img="${e.image_filename}"><i class="${e.favorite ? 'fa-solid' : 'fa-regular'} fa-heart ca-icon" aria-hidden="true"></i><span class="ca-label">收藏</span></button>
-                  <button class="ca-btn" aria-label="分享" onclick="event.stopPropagation();shareImage('${e.image_filename}', event)"><i class="fa-solid fa-share-nodes ca-icon" aria-hidden="true"></i><span class="ca-label">分享</span></button>
-                  <button class="ca-btn danger" aria-label="删除" onclick="event.stopPropagation();deleteImage('${e.image_filename || e.date}', event)"><i class="fa-regular fa-trash-can ca-icon" aria-hidden="true"></i><span class="ca-label">删除</span></button>
+                  <button class="ca-btn ${e.favorite ? 'liked' : ''}" aria-label="${e.favorite ? '取消收藏' : '收藏'}" onclick="event.stopPropagation();toggleFavorite(${imageFilenameArg}, event)" data-img="${imageFilenameAttr}"><i class="${e.favorite ? 'fa-solid' : 'fa-regular'} fa-heart ca-icon" aria-hidden="true"></i><span class="ca-label">收藏</span></button>
+                  <button class="ca-btn" aria-label="分享" onclick="event.stopPropagation();shareImage(${imageFilenameArg}, event)"><i class="fa-solid fa-share-nodes ca-icon" aria-hidden="true"></i><span class="ca-label">分享</span></button>
+                  <button class="ca-btn danger" aria-label="删除" onclick="event.stopPropagation();deleteImage(${deleteArg}, event)"><i class="fa-regular fa-trash-can ca-icon" aria-hidden="true"></i><span class="ca-label">删除</span></button>
                 </div>
               </div>
             </div>`;
@@ -4550,7 +4662,12 @@ imgFs.onclick = () => { imgFs.classList.remove("open"); };
 document.body.appendChild(imgFs);
 
 function openFullscreenImg(src) {
-  imgFs.innerHTML = `<img src="${src}" alt="放大查看" decoding="async">`;
+  imgFs.replaceChildren();
+  const img = document.createElement("img");
+  img.src = src;
+  img.alt = "放大查看";
+  img.decoding = "async";
+  imgFs.appendChild(img);
   imgFs.classList.add("open");
 }
 
@@ -4594,7 +4711,9 @@ function openModal(e) {
   if (!e.image_filename) return;
   currentModalImg = e.image_filename;
   resetModalDetailHeight();
-  document.getElementById("modalImageWrap").innerHTML = `<img src="/images/${e.image_filename}" alt="${e.caption || appDisplay.shareTitle}" decoding="async" onclick="openFullscreenImg('/images/${e.image_filename}')">`;
+  const modalImgFilename = escapeAttr(e.image_filename);
+  const modalAltText = escapeAttr(e.caption || appDisplay.shareTitle);
+  document.getElementById("modalImageWrap").innerHTML = `<img src="/images/${modalImgFilename}" alt="${modalAltText}" decoding="async" onclick="openFullscreenImg(${jsStringArg('/images/' + e.image_filename)})">`;
   const modalImg = document.querySelector("#modalImageWrap img");
   if (modalImg) modalImg.onload = syncModalDetailHeight;
   document.getElementById("modalDate").textContent = formatDate(e.date) + (e.time ? ' ' + e.time : '');
@@ -4604,15 +4723,15 @@ function openModal(e) {
   else { styleEl.style.display = "none"; }
   // Meta tags (model + base_style)
   let metaHtml = "";
-  if (e.model_name) metaHtml += `<span class="meta-tag">🤖 ${e.model_name}</span>`;
+  if (e.model_name) metaHtml += `<span class="meta-tag">🤖 ${escapeHtml(e.model_name)}</span>`;
   const referenceLabel = displayReferenceMeta(e);
-  if (referenceLabel) metaHtml += `<span class="meta-tag">${referenceLabel}</span>`;
+  if (referenceLabel) metaHtml += `<span class="meta-tag">${escapeHtml(referenceLabel)}</span>`;
   const sizeLabel = displayImageSizeMeta(e);
-  if (sizeLabel) metaHtml += `<span class="meta-tag">${sizeLabel}</span>`;
+  if (sizeLabel) metaHtml += `<span class="meta-tag">${escapeHtml(sizeLabel)}</span>`;
   const fileSizeLabel = displayFileSizeMeta(e);
-  if (fileSizeLabel) metaHtml += `<span class="meta-tag">${fileSizeLabel}</span>`;
+  if (fileSizeLabel) metaHtml += `<span class="meta-tag">${escapeHtml(fileSizeLabel)}</span>`;
   const generationTimeLabel = displayGenerationTimeMeta(e);
-  if (generationTimeLabel) metaHtml += `<span class="meta-tag">${generationTimeLabel}</span>`;
+  if (generationTimeLabel) metaHtml += `<span class="meta-tag">${escapeHtml(generationTimeLabel)}</span>`;
   metaHtml += renderRerollButton(e, {id: "modalRerollBtn", modal: true});
   document.getElementById("modalMeta").innerHTML = metaHtml;
   document.getElementById("modalMeta").style.display = metaHtml ? "flex" : "none";
@@ -4620,12 +4739,12 @@ function openModal(e) {
     ? `<button type="button" class="outfit-magic-btn" onclick="quickCustomImg2ImgFromModal(event,this)" title="用自定义输入框提示词图生图" aria-label="用自定义输入框提示词图生图"><i class="fa-solid fa-wand-magic-sparkles" aria-hidden="true"></i></button>`
     : "";
   document.getElementById("modalOutfit").innerHTML = e.outfit
-    ? `<span class="outfit-label">${modalOutfitLabel(e)}</span><span class="outfit-divider">|</span><span class="outfit-text">${extractOutfitText(e.outfit)}</span>${outfitMagicBtn}`
+    ? `<span class="outfit-label">${escapeHtml(modalOutfitLabel(e))}</span><span class="outfit-divider">|</span><span class="outfit-text">${escapeHtml(extractOutfitText(e.outfit))}</span>${outfitMagicBtn}`
     : '--';
   // Schedule
   const schedEl = document.getElementById("modalSchedule");
   if (e.schedule_time) {
-    schedEl.innerHTML = `<div class="sched-item"><span class="sched-text">${e.schedule_time}</span></div>`;
+    schedEl.innerHTML = `<div class="sched-item"><span class="sched-text">${escapeHtml(e.schedule_time)}</span></div>`;
     schedEl.style.display = "block";
   } else if (e.schedule) {
     const parsed = parseSchedule(e.schedule);
@@ -4633,21 +4752,21 @@ function openModal(e) {
       schedEl.innerHTML = parsed.items.map(item => {
         const label = item.time || item.icon;
         const text = item.text;
-        if (label) return `<div class="sched-item"><span class="sched-label">${label}</span><span class="sched-text">${text}</span></div>`;
-        return `<div class="sched-item"><span class="sched-text">${text}</span></div>`;
+        if (label) return `<div class="sched-item"><span class="sched-label">${escapeHtml(label)}</span><span class="sched-text">${escapeHtml(text)}</span></div>`;
+        return `<div class="sched-item"><span class="sched-text">${escapeHtml(text)}</span></div>`;
       }).join('');
       schedEl.style.display = "block";
     } else {
       const contextText = modalSourceContext(e);
       if (contextText) {
-        schedEl.innerHTML = `<div class="sched-item modal-source-item"><span class="sched-label">来源</span><span class="sched-text">${contextText}</span></div>`;
+        schedEl.innerHTML = `<div class="sched-item modal-source-item"><span class="sched-label">来源</span><span class="sched-text">${escapeHtml(contextText)}</span></div>`;
         schedEl.style.display = "block";
       } else { schedEl.style.display = "none"; }
     }
   } else {
     const contextText = modalSourceContext(e);
     if (contextText) {
-      schedEl.innerHTML = `<div class="sched-item modal-source-item"><span class="sched-label">来源</span><span class="sched-text">${contextText}</span></div>`;
+      schedEl.innerHTML = `<div class="sched-item modal-source-item"><span class="sched-label">来源</span><span class="sched-text">${escapeHtml(contextText)}</span></div>`;
       schedEl.style.display = "block";
     } else { schedEl.style.display = "none"; }
   }
@@ -5113,23 +5232,28 @@ function currentCustomGenPayload(refImageOverride = "") {
   return { body };
 }
 
-function openCustomGen() {
+function openCustomGen(options = {}) {
+  activeCustomWardrobeRef = options.wardrobeRef || null;
   restoreCustomGenState();
   document.getElementById("cgOverlay").classList.add("open");
   document.body.style.overflow = "hidden";
   updateCustomSizeHint();
   loadCustomImageModels();
-  // Load gallery images as reference options
-  loadRefImages();
+  return loadRefImages({
+    selectedRef: activeCustomWardrobeRef ? activeCustomWardrobeRef.url : ""
+  });
 }
 
 async function openCustomGenFromWardrobe(btn) {
   const ref = btn && btn.dataset ? String(btn.dataset.ref || '').trim() : '';
-  openCustomGen();
   if (!ref) return;
-  await loadRefImages();
-  const grid = document.getElementById("cgRefGrid");
-  restoreCustomRefSelection(grid, ref);
+  const label = btn && btn.dataset ? String(btn.dataset.refLabel || '').trim() : '';
+  await openCustomGen({
+    wardrobeRef: {
+      url: ref,
+      label: label || '衣柜参考'
+    }
+  });
   saveCustomGenState();
   showToast("🧥 已把衣架图放进参考图");
 }
@@ -5155,7 +5279,7 @@ document.addEventListener("DOMContentLoaded", () => {
 });
 // Reference image selector
 let uploadedRefs = [];
-let wardrobeRefs = [];
+let activeCustomWardrobeRef = null;
 function mergeBuiltinRefs(refList) {
   const refs = new Map();
   BUILTIN_REF_FALLBACKS.forEach(ref => refs.set(ref.filename, ref));
@@ -5173,9 +5297,11 @@ function bindReferenceGridSelection(grid) {
     });
   });
 }
-function renderRefImages(builtinRefs, uploadRefs) {
+function renderRefImages(builtinRefs, uploadRefs, options = {}) {
   const grid = document.getElementById("cgRefGrid");
   if (!grid) return;
+  const wardrobeRef = options.wardrobeRef || activeCustomWardrobeRef;
+  const selectedRef = options.selectedRef || "";
   let html = `<div class="cg-ref-item active" data-ref=""><div class="cg-ref-none">📸</div></div>`;
 
   builtinRefs.forEach(ref => {
@@ -5187,14 +5313,15 @@ function renderRefImages(builtinRefs, uploadRefs) {
     </div>`;
   });
 
-  wardrobeRefs.forEach((ref, idx) => {
+  if (wardrobeRef && wardrobeRef.url) {
+    const ref = wardrobeRef;
     const label = escapeHtml(ref.label || "衣柜参考");
     const url = escapeHtml(ref.url || "");
-    html += `<div class="cg-ref-item wardrobe" data-ref="${url}" data-wardrobe-idx="${idx}" title="${label}">
+    html += `<div class="cg-ref-item wardrobe" data-ref="${url}" title="${label}">
       <img src="${url}" alt="${label}" loading="lazy" decoding="async" style="object-fit:cover;width:100%;height:100%;">
       <span style="position:absolute;bottom:2px;left:0;right:0;text-align:center;font-size:10px;color:#fff;background:rgba(0,0,0,0.5);border-radius:0 0 8px 8px;">${label}</span>
     </div>`;
-  });
+  }
 
   uploadRefs.forEach((u, idx) => {
     const label = escapeHtml(u.label || "自定义上传");
@@ -5205,16 +5332,16 @@ function renderRefImages(builtinRefs, uploadRefs) {
     </div>`;
   });
 
-  if (builtinRefs.length === 0 && uploadRefs.length === 0) {
+  if (builtinRefs.length === 0 && uploadRefs.length === 0 && !(wardrobeRef && wardrobeRef.url)) {
     html += `<div style="padding:10px;color:#999;font-size:13px;">暂无参考图，点击"📤 上传参考图"添加</div>`;
   }
 
   grid.innerHTML = html;
-  restoreCustomRefSelection(grid, readCustomGenState().ref || "");
+  restoreCustomRefSelection(grid, selectedRef || readCustomGenState().ref || "");
   bindReferenceGridSelection(grid);
 }
-async function loadRefImages() {
-  renderRefImages(BUILTIN_REF_FALLBACKS, uploadedRefs);
+async function loadRefImages(options = {}) {
+  renderRefImages(BUILTIN_REF_FALLBACKS, uploadedRefs, options);
   try {
     // 同时加载内置底模 + 用户上传
     const [refListRes, uploadedRes] = await Promise.all([
@@ -5224,13 +5351,12 @@ async function loadRefImages() {
     const refList = await refListRes.json();
     const uploadedRefsFromServer = await uploadedRes.json();
     const refItems = Array.isArray(refList) ? refList : [];
-    wardrobeRefs = refItems.filter(ref => String(ref.style || "").trim() === "wardrobe");
     const builtinRefs = refItems.filter(ref => ref && ref.builtin);
     uploadedRefs = uploadedRefsFromServer;
-    renderRefImages(mergeBuiltinRefs(builtinRefs), uploadedRefs);
+    renderRefImages(mergeBuiltinRefs(builtinRefs), uploadedRefs, options);
   } catch(e) {
     console.error("load refs:", e);
-    renderRefImages(BUILTIN_REF_FALLBACKS, uploadedRefs);
+    renderRefImages(BUILTIN_REF_FALLBACKS, uploadedRefs, options);
   }
 }
 async function uploadRefImage(event) {
@@ -5655,6 +5781,21 @@ async function loadSettingsStatus() {
     applyDisplayConfig(data);
     setPushChannel(data.push_channel || "wechat");
 
+    const hermesCliEl = document.getElementById("skHermesCliPath");
+    const hermesCliStatus = document.getElementById("skHermesCliStatus");
+    if (hermesCliEl) hermesCliEl.value = data.hermes_cli || "";
+    if (hermesCliStatus) {
+      hermesCliStatus.textContent = data.hermes_cli ? "✓ 已设置" : "○ 留空自动查找";
+      hermesCliStatus.className = data.hermes_cli ? "sk-status set" : "sk-status unset";
+    }
+    const openclawCliEl = document.getElementById("skOpenclawCliPath");
+    const openclawCliStatus = document.getElementById("skOpenclawCliStatus");
+    if (openclawCliEl) openclawCliEl.value = data.openclaw_cli || "";
+    if (openclawCliStatus) {
+      openclawCliStatus.textContent = data.openclaw_cli ? "✓ 已设置" : "○ 留空自动查找";
+      openclawCliStatus.className = data.openclaw_cli ? "sk-status set" : "sk-status unset";
+    }
+
     // Update status indicators
     updateStatus("skGiteeStatus", data.gitee_key);
     updateStatus("skCpaKeyStatus", data.cpa_key);
@@ -5693,6 +5834,18 @@ async function loadSettingsStatus() {
       gptStatus.textContent = "○ 必填";
       gptStatus.className = "sk-status unset";
     }
+    clearGptEndpointRows();
+    if (Array.isArray(data.gpt_image_endpoints)) {
+      data.gpt_image_endpoints.forEach(endpoint => {
+        addGptEndpointRow(endpoint.label || "", endpoint.base_url || "", endpoint.api_key || "");
+      });
+    }
+    const endpointsStatus = document.getElementById("skGptEndpointsStatus");
+    if (endpointsStatus) {
+      const endpointCount = Array.isArray(data.gpt_image_endpoints) ? data.gpt_image_endpoints.length : 0;
+      endpointsStatus.textContent = endpointCount ? `✓ ${endpointCount} 个端点` : "○ 未配置（使用单端点）";
+      endpointsStatus.className = endpointCount ? "sk-status set" : "sk-status unset";
+    }
     const cpaUrlEl = document.getElementById("skCpaUrl");
     const cpaUrlStatus = document.getElementById("skCpaUrlStatus");
     cpaUrlEl.value = data.cpa_url_local || data.cpa_url || "";
@@ -5706,22 +5859,6 @@ async function loadSettingsStatus() {
       cpaUrlStatus.className = "sk-status unset";
     }
     const githubProxyEl = document.getElementById("skGithubProxy");
-    const githubApiEl = document.getElementById("skGithubApi");
-    const githubApiStatus = document.getElementById("skGithubApiStatus");
-    if (githubApiEl) {
-      githubApiEl.value = data.github_api_local || data.github_api || "";
-      githubApiEl.dataset.localValue = data.github_api_local || "";
-      githubApiEl.dataset.defaultValue = data.github_api_default || "";
-    }
-    if (githubApiStatus) {
-      if (githubApiEl && githubApiEl.value.trim()) {
-        githubApiStatus.textContent = "✓ 已设置";
-        githubApiStatus.className = "sk-status set";
-      } else {
-        githubApiStatus.textContent = "○ 必填";
-        githubApiStatus.className = "sk-status unset";
-      }
-    }
     githubProxyEl.value = data.github_proxy || "";
     const githubProxyStatus = document.getElementById("skGithubProxyStatus");
     if (githubProxyStatus) {
@@ -5941,15 +6078,15 @@ async function testLlmModel() {
 
   if (btn) {
     btn.disabled = true;
-    btn.textContent = "测试中...";
+    btn.textContent = "轮询中...";
   }
   if (status) {
-    status.textContent = "正在测试 " + model + "...";
+    status.textContent = "正在轮询测试 " + model + "，单次上游失败会继续重试...";
     status.className = "sk-status unset";
   }
 
   try {
-    const payload = { model };
+    const payload = { model, attempts: 5, timeout_seconds: 12 };
     if (cpaUrl) payload.cpa_url = cpaUrl;
     if (cpaKey) payload.cpa_key = cpaKey;
     const res = await fetch(`${API}/api/models/test`, {
@@ -5962,8 +6099,9 @@ async function testLlmModel() {
     const detail = data.detail ? "：" + data.detail : "";
     if (data.success) {
       const latency = data.latency_ms ? ` · ${data.latency_ms}ms` : "";
+      const attempt = data.attempt && data.attempts ? ` · 第 ${data.attempt}/${data.attempts} 次命中` : "";
       if (status) {
-        status.textContent = "✓ 模型可用: " + (data.model || model) + latency;
+        status.textContent = "✓ 模型可用: " + (data.model || model) + latency + attempt;
         status.className = "sk-status set";
       }
       showToast("✅ 模型可用");
@@ -5998,17 +6136,67 @@ function requireSettingsValue(label, value, missing) {
   if (!String(value || "").trim()) missing.push(label);
 }
 
+function addGptEndpointRow(label = "", baseUrl = "", apiKey = "") {
+  const list = document.getElementById("skGptEndpointsList");
+  if (!list) return;
+
+  const row = document.createElement("div");
+  row.className = "sk-endpoint-row";
+
+  const labelInput = document.createElement("input");
+  labelInput.type = "text";
+  labelInput.className = "sk-endpoint-label";
+  labelInput.placeholder = "标签";
+  labelInput.value = label || "";
+
+  const urlInput = document.createElement("input");
+  urlInput.type = "text";
+  urlInput.className = "sk-endpoint-url";
+  urlInput.placeholder = "Base URL (/v1)";
+  urlInput.value = baseUrl || "";
+
+  const keyInput = document.createElement("input");
+  keyInput.type = "password";
+  keyInput.className = "sk-endpoint-key";
+  keyInput.placeholder = "API Key";
+  keyInput.autocomplete = "off";
+  keyInput.value = apiKey || "";
+
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "sk-endpoint-del-btn";
+  delBtn.textContent = "删除";
+  delBtn.addEventListener("click", () => row.remove());
+
+  row.append(labelInput, urlInput, keyInput, delBtn);
+  list.appendChild(row);
+}
+
+function clearGptEndpointRows() {
+  const list = document.getElementById("skGptEndpointsList");
+  if (list) list.replaceChildren();
+}
+
+function collectGptEndpoints() {
+  const list = document.getElementById("skGptEndpointsList");
+  if (!list) return [];
+  return Array.from(list.querySelectorAll(".sk-endpoint-row")).map(row => {
+    const label = row.querySelector(".sk-endpoint-label")?.value.trim() || "";
+    const baseUrl = row.querySelector(".sk-endpoint-url")?.value.trim() || "";
+    const apiKey = row.querySelector(".sk-endpoint-key")?.value.trim() || "";
+    return { label, base_url: baseUrl, api_key: apiKey };
+  }).filter(endpoint => endpoint.label || endpoint.base_url || endpoint.api_key);
+}
+
 async function saveSettings() {
   const giteeUrl = document.getElementById("skGiteeUrl").value.trim();
   const giteeKey = document.getElementById("skGiteeKey").value.trim();
   const gptKey = document.getElementById("skGptKey").value.trim();
   const gptBaseUrlEl = document.getElementById("skGptBaseUrl");
   const cpaUrlEl = document.getElementById("skCpaUrl");
-  const githubApiEl = document.getElementById("skGithubApi");
   const gptBaseUrl = gptBaseUrlEl.value.trim();
   const cpaUrl = cpaUrlEl.value.trim();
   const cpaKey = document.getElementById("skCpaKey").value.trim();
-  const githubApi = githubApiEl.value.trim();
   const githubProxy = document.getElementById("skGithubProxy").value.trim();
   const imageDir = document.getElementById("skImageDir").value.trim();
   const appearance = document.getElementById("skAppearance").value.trim();
@@ -6024,7 +6212,6 @@ async function saveSettings() {
   if (!gptKey && !hasSavedSecret("gpt_key")) missing.push("GPT Image Key");
   requireSettingsValue("CPA Base URL", cpaUrl, missing);
   if (!cpaKey && !hasSavedSecret("cpa_key")) missing.push("CPA API Key");
-  requireSettingsValue("GitHub Release API URL", githubApi, missing);
   requireSettingsValue("GitHub API 代理", githubProxy, missing);
   if (missing.length) {
     showToast("请先填写：" + missing.join("、"), 7000);
@@ -6047,9 +6234,9 @@ async function saveSettings() {
     body.gitee_url = giteeUrl;
     if (gptKey) body.gpt_key = gptKey;
     body.gpt_base_url = gptBaseUrl;
+    body.gpt_image_endpoints = collectGptEndpoints();
     body.cpa_url = cpaUrl;
     if (cpaKey) body.cpa_key = cpaKey;
-    body.github_api = githubApi;
     body.github_proxy = githubProxy;
     body.image_dir = imageDir;
     // appearance: always send (empty = remove local appearance)
@@ -6057,6 +6244,8 @@ async function saveSettings() {
     body.persona_source = personaSource;
     body.persona = personaSource === "custom" ? persona : "";
     body.push_channel = pushChannel;
+    body.hermes_cli = document.getElementById("skHermesCliPath")?.value.trim() || "";
+    body.openclaw_cli = document.getElementById("skOpenclawCliPath")?.value.trim() || "";
     body.gitee_fallback_enabled = giteeFallbackEnabled;
     // llm_model: always send
     body.llm_model = llmModel;
@@ -6116,21 +6305,27 @@ async function checkUpdate() {
     const data = await res.json();
     
     if (data.error) {
-      resultDiv.innerHTML = `<div class="sk-update-pill error">❌ ${data.error}</div>`;
+      resultDiv.innerHTML = `<div class="sk-update-pill error">❌ ${escapeHtml(data.error)}</div>`;
     } else if (data.update_available) {
+      const latest = escapeHtml(data.latest || "");
+      const changelog = escapeHtml(data.changelog || "更新内容详见 GitHub");
+      const htmlUrl = String(data.html_url || "").trim();
+      const htmlUrlHtml = /^https?:\/\//i.test(htmlUrl)
+        ? `<a href="${escapeAttr(htmlUrl)}" target="_blank" rel="noopener noreferrer" style="font-size:12px;color:#1976d2;">查看完整更新日志</a><br>`
+        : "";
       resultDiv.innerHTML = `
         <div class="sk-update-card">
-          <div style="font-weight:600;color:#2e7d32;margin-bottom:8px;">🎉 发现新版本 v${data.latest}</div>
-          <div style="font-size:13px;color:#555;margin-bottom:10px;">${data.changelog || '更新内容详见 GitHub'}</div>
+          <div style="font-weight:600;color:#2e7d32;margin-bottom:8px;">🎉 发现新版本 v${latest}</div>
+          <div style="font-size:13px;color:#555;margin-bottom:10px;">${changelog}</div>
           <div class="sk-update-safe-note">只更新仓库代码；本地 API Key、Base URL、appearance、画廊图片和参考图会保留。Hermes 可调用 /api/hermes/update 自动安全升级。</div>
-          ${data.html_url ? `<a href="${data.html_url}" target="_blank" style="font-size:12px;color:#1976d2;">查看完整更新日志</a><br>` : ''}
-          <button class="sk-update-action" id="applyUpdateBtn" onclick="applyUpdate()">⬆️ 一键安全升级到 v${data.latest}</button>
+          ${htmlUrlHtml}
+          <button class="sk-update-action" id="applyUpdateBtn" onclick="applyUpdate()">⬆️ 一键安全升级到 v${latest}</button>
         </div>`;
     } else {
       resultDiv.innerHTML = `<div class="sk-update-pill ok">✅ 已是最新版本</div>`;
     }
   } catch(e) {
-    resultDiv.innerHTML = `<div class="sk-update-pill error">❌ 检查失败: ${e.message}</div>`;
+    resultDiv.innerHTML = `<div class="sk-update-pill error">❌ 检查失败: ${escapeHtml(e.message)}</div>`;
   } finally {
     btn.disabled = false;
     btn.textContent = "🔍 检查更新";
@@ -6150,16 +6345,83 @@ async function applyUpdate() {
     const data = await res.json();
     
     if (data.error) {
-      resultDiv.innerHTML = `<div class="sk-update-pill error">❌ ${data.error}</div>`;
+      resultDiv.innerHTML = `<div class="sk-update-pill error">❌ ${escapeHtml(data.error)}</div>`;
     } else {
-      resultDiv.innerHTML = `<div class="sk-update-pill ok">✅ ${data.message || '更新成功，服务已重启'}</div>`;
+      resultDiv.innerHTML = `<div class="sk-update-pill ok">✅ ${escapeHtml(data.message || '更新成功，服务已重启')}</div>`;
       // Reload page after 3 seconds
       setTimeout(() => {
         location.reload();
       }, 3000);
     }
   } catch(e) {
-    resultDiv.innerHTML = `<div class="sk-update-pill error">❌ 更新失败: ${e.message}</div>`;
+    resultDiv.innerHTML = `<div class="sk-update-pill error">❌ 更新失败: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function waitForServiceOnline(resultDiv, timeoutMs = 12000) {
+  const start = Date.now();
+  const poll = async () => {
+    try {
+      const res = await fetch(`${API}/api/health?restart_check=${Date.now()}`, { cache: "no-store" });
+      if (res.ok) {
+        if (resultDiv) {
+          resultDiv.innerHTML = `<div class="sk-update-pill ok">✅ 服务已恢复，正在刷新...</div>`;
+        }
+        setTimeout(() => location.reload(), 500);
+        return;
+      }
+    } catch(e) {
+      // Service may be between execv and bind; keep polling briefly.
+    }
+    if (Date.now() - start >= timeoutMs) {
+      if (resultDiv) {
+        resultDiv.innerHTML = `<div class="sk-update-pill error">⚠️ 还没确认服务恢复，正在刷新重试...</div>`;
+      }
+      setTimeout(() => location.reload(), 800);
+      return;
+    }
+    setTimeout(poll, 700);
+  };
+  setTimeout(poll, 1200);
+}
+
+async function restartService() {
+  const btn = document.getElementById("restartServiceBtn");
+  const resultDiv = document.getElementById("updateResult");
+  if (!btn || !resultDiv) return;
+
+  if (!confirm("确定要重启服务吗？这只会重载当前进程，不会拉取代码，也不会修改本地设置。")) return;
+
+  btn.disabled = true;
+  btn.textContent = "⏳ 重启中...";
+  resultDiv.innerHTML = `<div class="sk-update-pill ok">⏳ 正在请求服务重启...</div>`;
+
+  try {
+    const res = await fetch(`${API}/api/restart`, { method: "POST" });
+    const rawText = await res.text();
+    let data = {};
+    if (rawText) {
+      try {
+        data = JSON.parse(rawText);
+      } catch(e) {
+        data = { error: rawText };
+      }
+    }
+    if (!res.ok || data.error) {
+      const message = res.status === 404
+        ? "当前后端还没加载重启接口，请先用 app/run_launch.sh 启动一次；之后这个按钮会按 Python 模式重启。"
+        : (data.message || data.error || `HTTP ${res.status}`);
+      resultDiv.innerHTML = `<div class="sk-update-pill error">❌ ${escapeHtml(message)}</div>`;
+      btn.disabled = false;
+      btn.textContent = "🔄 重启服务";
+      return;
+    }
+    resultDiv.innerHTML = `<div class="sk-update-pill ok">✅ ${escapeHtml(data.message || "服务即将重启")}</div>`;
+    waitForServiceOnline(resultDiv);
+  } catch(e) {
+    resultDiv.innerHTML = `<div class="sk-update-pill error">❌ 重启失败: ${escapeHtml(e.message || "未知错误")}</div>`;
+    btn.disabled = false;
+    btn.textContent = "🔄 重启服务";
   }
 }
 
@@ -6314,6 +6576,7 @@ document.addEventListener("keydown", e => {
 // 🐷 日程彩蛋弹窗（左上角 logo 点击触发）
 function escapeHtml(s) { var d=document.createElement('div'); d.appendChild(document.createTextNode(s)); return d.innerHTML; }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
+function jsStringArg(s) { return escapeAttr(JSON.stringify(String(s || ""))); }
 
 function extractClockTime(value) {
   var m = String(value || '').match(/(\d{1,2}:\d{2})/);
@@ -6933,7 +7196,7 @@ function renderWardrobeItem(item) {
   html += '<button class="wardrobe-action-btn wardrobe-generate-btn" type="button" data-wardrobe-action="generate" data-outfit-id="' + escapeAttr(outfitId) + '"' + (wardrobeGenerating ? ' disabled' : '') + '>' + (wardrobeGenerating ? '生成中' : (hasWardrobeImage ? '重生衣架图' : '生成衣架图')) + '</button>';
   html += '<button class="wardrobe-action-btn" type="button" data-wardrobe-action="edit" data-outfit-id="' + escapeAttr(outfitId) + '">编辑</button>';
   if (hasWardrobeImage) {
-    html += '<button class="wardrobe-action-btn" type="button" data-wardrobe-action="use-ref" data-ref="' + escapeAttr(wardrobeImageUrl) + '">用它生图</button>';
+    html += '<button class="wardrobe-action-btn" type="button" data-wardrobe-action="use-ref" data-ref="' + escapeAttr(wardrobeImageUrl) + '" data-ref-label="' + escapeAttr('衣柜 · ' + style) + '">用它生图</button>';
   }
   html += '<button class="wardrobe-remove-btn" type="button" data-payload="' + removePayloadAttr + '" onclick="removeFavoriteOutfitPlan(this)">取消收藏</button>';
   if (wardrobeGenerating || wardrobeFailed) {
@@ -7481,6 +7744,8 @@ function retryPhotoJob(timeText, btn) {
       startPhotoRetryPolling(timeText);
     } else if (data.status === 'limit_reached') {
       showToast(data.message || '今日生图计划已达上限');
+    } else if (data.status === 'quiet_hours' || data.status === 'quiet_schedule_time' || data.status === 'exact_schedule_time') {
+      showToast(data.message || '03:00-06:00 不执行生图');
     } else {
       keepDisabled = true;
       showToast('已开始补拍：' + timeText);
@@ -7690,11 +7955,13 @@ function ensureLiveLogOverlay() {
   overlay.innerHTML = '<div class="prompt-card log-card">' +
     '<div class="prompt-header"><span>📜 运行诊断日志</span><button class="prompt-close" onclick="closeLiveLogs()">✕</button></div>' +
     '<div class="prompt-body log-body"><pre id="liveLogText">正在读取日志...</pre></div>' +
-    '<div class="prompt-footer">' +
+    '<div class="prompt-footer log-footer">' +
       '<span class="log-status" id="liveLogStatus">准备刷新</span>' +
-      '<label class="log-toggle"><input id="liveLogAuto" type="checkbox" checked onchange="toggleLiveLogAuto()">自动刷新</label>' +
-      '<button class="prompt-copy-btn" onclick="refreshLiveLogs(true)">刷新</button>' +
-      '<button class="prompt-copy-btn" onclick="copyLiveLogs()">复制</button>' +
+      '<div class="log-controls">' +
+        '<label class="log-toggle"><input id="liveLogAuto" type="checkbox" checked onchange="toggleLiveLogAuto()">自动刷新</label>' +
+        '<button class="prompt-copy-btn" onclick="refreshLiveLogs(true)">刷新</button>' +
+        '<button class="prompt-copy-btn" onclick="copyLiveLogs()">复制</button>' +
+      '</div>' +
     '</div>' +
     '</div>';
   document.body.appendChild(overlay);
