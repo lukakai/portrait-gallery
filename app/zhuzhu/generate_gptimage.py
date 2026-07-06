@@ -4,11 +4,14 @@ import argparse
 import base64
 import io
 import json
+import mimetypes
 import os
 import re
 import sys
 import time
 from typing import Optional
+import urllib.error
+import urllib.request
 from urllib.parse import urlparse
 
 import requests
@@ -57,7 +60,10 @@ TEXT2IMG_TIMEOUT = get_image_request_timeout("text2img")
 IMG2IMG_TIMEOUT = get_image_request_timeout("img2img")
 IMG2IMG_MAX_SIZE = get_image_int("img2img_max_size", 512, 64)
 IMG2IMG_QUALITY = get_image_int("img2img_quality", 75, 1, 100)
+GPTIMAGE_MAX_TOKENS = get_image_int("gpt_image_max_tokens", 16000, 1)
 _IMAGES_API_UNSUPPORTED_BASES: set[str] = set()
+GPTIMAGE_SESSION = requests.Session()
+GPTIMAGE_SESSION.trust_env = True
 
 
 def _configured_image_base_url(url: str) -> str:
@@ -233,6 +239,66 @@ def _is_agnes_model(model: str) -> bool:
     return (model or "").strip().lower().startswith("agnes-image-")
 
 
+def _uses_json_image_edit(model: str) -> bool:
+    return (model or "").strip().lower() == "gpt-image-2"
+
+
+def _image_edit_payload_mode(model: str) -> str:
+    raw = os.getenv("GPT_IMAGE_EDIT_MODE", "").strip().lower()
+    if not raw:
+        config = _load_api_keys_config()
+        raw = str(config.get("gpt_image_edit_mode") or "").strip().lower()
+    if raw in {"multipart", "file", "upload"}:
+        return "multipart"
+    if raw in {"url", "image_url", "public_url"}:
+        return "url"
+    if raw in {"data_url", "base64", "json"}:
+        return "data_url"
+    return "data_url" if _uses_json_image_edit(model) else "multipart"
+
+
+def _image_edit_payload_modes(model: str) -> list[str]:
+    """Return ordered /images/edits transport modes.
+
+    gpt-image-2 compatible relays are inconsistent: some accept the JSON
+    images field, while others only accept the older multipart image upload.
+    Both are still image-to-image requests to /images/edits.
+    """
+    primary = _image_edit_payload_mode(model)
+    if primary == "data_url":
+        return ["data_url", "multipart"]
+    return [primary]
+
+
+def _load_api_keys_config() -> dict:
+    if not os.path.exists(_API_KEYS_CONFIG_PATH):
+        return {}
+    try:
+        with open(_API_KEYS_CONFIG_PATH, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _reference_image_url_for_json(ref_image: str, mode: str) -> str:
+    """Return image_url value for JSON /images/edits payload."""
+    raw = str(ref_image or "").strip()
+    if raw.startswith(("http://", "https://", "data:image/")):
+        return raw
+
+    if mode == "url":
+        return ""
+
+    path = os.path.abspath(os.path.expanduser(raw))
+    if not os.path.isfile(path):
+        return ""
+    mime = mimetypes.guess_type(path)[0] or "image/jpeg"
+    with open(path, "rb") as f:
+        image_b64 = base64.b64encode(f.read()).decode()
+    return f"data:{mime};base64,{image_b64}"
+
+
 def _image_engine_label(model: str = "") -> str:
     name = (model or GPTIMAGE_DIRECT_MODEL or "").strip()
     lower = name.lower()
@@ -241,6 +307,31 @@ def _image_engine_label(model: str = "") -> str:
     if "gpt-image" in lower or lower == "gpt image":
         return "GPT Image"
     return name or "GPT Image"
+
+
+def _redact_proxy_url(value: str) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    parsed = urlparse(text)
+    if parsed.username or parsed.password:
+        host = parsed.hostname or ""
+        port = f":{parsed.port}" if parsed.port else ""
+        return f"{parsed.scheme}://***@{host}{port}"
+    return text
+
+
+def _proxy_diagnostics() -> str:
+    proxies = urllib.request.getproxies()
+    parts = []
+    for key in ("http", "https", "all"):
+        value = proxies.get(key) or os.getenv(f"{key.upper()}_PROXY") or os.getenv(f"{key}_proxy")
+        if value:
+            parts.append(f"{key}={_redact_proxy_url(value)}")
+    no_proxy = os.getenv("NO_PROXY") or os.getenv("no_proxy") or proxies.get("no")
+    if no_proxy:
+        parts.append(f"no_proxy={no_proxy}")
+    return "; ".join(parts) or "none"
 
 
 def _gpt_headers(content_type: bool = False) -> dict:
@@ -348,112 +439,182 @@ def _reference_edit_instruction(ref_image: Optional[str]) -> str:
 
 
 def _generate_via_images_api(prompt: str, ref_image: Optional[str], size: Optional[str], raw_base_url: str) -> Optional[tuple]:
-    """Call OpenAI-compatible /v1/images/generations or /v1/images/edits."""
+    """Call OpenAI-compatible /v1/images/edits in image-to-image mode."""
     images_base = _normalize_gpt_images_base_url(raw_base_url)
     engine_label = _image_engine_label()
     if not images_base:
         print("ERROR: image_gen.gpt_base_url is required", file=sys.stderr)
         return None
+    if not ref_image:
+        print("ERROR: image-to-image mode requires --ref-image; text2img is disabled", file=sys.stderr)
+        return None
 
-    agnes_img2img = bool(ref_image and _is_agnes_model(GPTIMAGE_DIRECT_MODEL))
-    endpoint = f"{images_base}/images/generations" if (not ref_image or agnes_img2img) else f"{images_base}/images/edits"
+    endpoint = f"{images_base}/images/edits"
     endpoint_label = _gpt_endpoint_label(endpoint)
     headers = _gpt_headers()
-    timeout = IMG2IMG_TIMEOUT if ref_image else TEXT2IMG_TIMEOUT
+    timeout = max(IMG2IMG_TIMEOUT, 500)
     start = time.time()
 
     edit_prompt = prompt
     if ref_image:
         edit_prompt += _reference_edit_instruction(ref_image)
 
-    for attempt in range(MAX_RETRIES):
-        try:
-            if ref_image and agnes_img2img:
-                payload = {
-                    "model": GPTIMAGE_DIRECT_MODEL,
-                    "prompt": edit_prompt,
-                    "n": 1,
-                    "extra_body": {
-                        "image": [_compress_image_for_img2img(ref_image)],
-                        "response_format": "url",
-                    },
-                }
-                if size:
-                    payload["size"] = size
-                resp = REQUEST_SESSION.post(
-                    endpoint,
-                    headers={**headers, "Content-Type": "application/json"},
-                    json=payload,
-                    timeout=timeout,
-                )
-            elif ref_image:
-                image_bytes = _image_bytes_for_edit(ref_image)
-                data = {
-                    "model": GPTIMAGE_DIRECT_MODEL,
-                    "prompt": edit_prompt,
-                    "n": "1",
-                }
-                if size:
-                    data["size"] = size
-                resp = REQUEST_SESSION.post(
-                    endpoint,
-                    headers=headers,
-                    data=data,
-                    files={"image": ("reference.png", image_bytes, "image/png")},
-                    timeout=timeout,
-                )
-            else:
-                payload = {
-                    "model": GPTIMAGE_DIRECT_MODEL,
-                    "prompt": prompt,
-                    "n": 1,
-                }
-                if size:
-                    payload["size"] = size
-                resp = REQUEST_SESSION.post(
-                    endpoint,
-                    headers={**headers, "Content-Type": "application/json"},
-                    json=payload,
-                    timeout=timeout,
-                )
-
-            if resp.status_code != 200:
-                if _looks_like_images_api_unsupported(resp.status_code, resp.text):
-                    _mark_images_api_unsupported(raw_base_url)
+    payload_modes = _image_edit_payload_modes(GPTIMAGE_DIRECT_MODEL)
+    for mode_index, payload_mode in enumerate(payload_modes):
+        for attempt in range(MAX_RETRIES):
+            try:
+                if payload_mode in {"data_url", "url"}:
+                    ref_url = _reference_image_url_for_json(ref_image, payload_mode)
+                    if not ref_url:
+                        print(
+                            f"ERROR: GPT Image images/edits cannot read reference image for JSON {payload_mode} mode: {ref_image}",
+                            file=sys.stderr,
+                        )
+                        return None
+                    payload = {
+                        "model": GPTIMAGE_DIRECT_MODEL,
+                        "prompt": edit_prompt,
+                        "images": [
+                            {"image_url": ref_url},
+                        ],
+                        "max_tokens": GPTIMAGE_MAX_TOKENS,
+                    }
+                    if size:
+                        payload["size"] = size
+                    body = json.dumps(payload).encode()
                     print(
-                        f"{engine_label} Images API unsupported [{endpoint_label}]",
+                        f"{engine_label} Images API request [{endpoint_label}]: "
+                        f"mode={payload_mode}, bytes={len(body)}, proxy={_proxy_diagnostics()}",
                         file=sys.stderr,
                     )
-                    return None
-                print(
-                    f"{engine_label} Images API error {resp.status_code} [{endpoint_label}] "
-                    f"(attempt {attempt + 1}/{MAX_RETRIES}): {resp.text[:240]}",
-                    file=sys.stderr,
-                )
-                if resp.status_code in RETRYABLE_STATUS and attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                    continue
-                return None
+                    req = urllib.request.Request(
+                        endpoint,
+                        data=body,
+                        headers={**headers, "Content-Type": "application/json"},
+                        method="POST",
+                    )
+                    try:
+                        with urllib.request.urlopen(req, timeout=timeout) as url_resp:
+                            response_text = url_resp.read().decode("utf-8", errors="replace")
+                            status_code = getattr(url_resp, "status", 200)
+                    except urllib.error.HTTPError as e:
+                        status_code = e.code
+                        response_text = e.read().decode("utf-8", errors="replace")
 
-            img_data = _image_response_bytes(resp.json())
-            if not img_data:
+                    if status_code != 200:
+                        if _looks_like_images_api_unsupported(status_code, response_text):
+                            _mark_images_api_unsupported(raw_base_url)
+                            print(
+                                f"{engine_label} Images API unsupported [{endpoint_label}]",
+                                file=sys.stderr,
+                            )
+                            return None
+                        print(
+                            f"{engine_label} Images API error {status_code} [{endpoint_label}] "
+                            f"(mode={payload_mode}, attempt {attempt + 1}/{MAX_RETRIES}): {response_text[:240]}",
+                            file=sys.stderr,
+                        )
+                        if status_code in RETRYABLE_STATUS and attempt < MAX_RETRIES - 1:
+                            time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+                            continue
+                        break
+
+                    try:
+                        response_json = json.loads(response_text)
+                    except json.JSONDecodeError:
+                        print(
+                            f"{engine_label} Images API: invalid JSON response [{endpoint_label}] "
+                            f"(mode={payload_mode}, attempt {attempt + 1}/{MAX_RETRIES}): {response_text[:240]}",
+                            file=sys.stderr,
+                        )
+                        if attempt < MAX_RETRIES - 1:
+                            time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+                            continue
+                        break
+
+                    img_data = _image_response_bytes(response_json)
+                    if not img_data:
+                        print(
+                            f"{engine_label} Images API: no image in response [{endpoint_label}] "
+                            f"(mode={payload_mode}, attempt {attempt + 1}/{MAX_RETRIES}): {response_text[:240]}",
+                            file=sys.stderr,
+                        )
+                        if attempt < MAX_RETRIES - 1:
+                            time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+                            continue
+                        break
+                    return img_data, round(time.time() - start, 2)
+                else:
+                    image_bytes = _image_bytes_for_edit(ref_image)
+                    data = {
+                        "model": GPTIMAGE_DIRECT_MODEL,
+                        "prompt": edit_prompt,
+                        "n": "1",
+                    }
+                    if size:
+                        data["size"] = size
+                    print(
+                        f"{engine_label} Images API request [{endpoint_label}]: "
+                        f"mode={payload_mode}, image_bytes={len(image_bytes)}, proxy={_proxy_diagnostics()}",
+                        file=sys.stderr,
+                    )
+                    resp = REQUEST_SESSION.post(
+                        endpoint,
+                        headers=headers,
+                        data=data,
+                        files={"image": ("reference.png", image_bytes, "image/png")},
+                        timeout=timeout,
+                    )
+
+                if resp.status_code != 200:
+                    if _looks_like_images_api_unsupported(resp.status_code, resp.text):
+                        _mark_images_api_unsupported(raw_base_url)
+                        print(
+                            f"{engine_label} Images API unsupported [{endpoint_label}]",
+                            file=sys.stderr,
+                        )
+                        return None
+                    print(
+                        f"{engine_label} Images API error {resp.status_code} [{endpoint_label}] "
+                        f"(mode={payload_mode}, attempt {attempt + 1}/{MAX_RETRIES}): {resp.text[:240]}",
+                        file=sys.stderr,
+                    )
+                    if resp.status_code in RETRYABLE_STATUS and attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+                        continue
+                    break
+
+                img_data = _image_response_bytes(resp.json())
+                if not img_data:
+                    print(
+                        f"{engine_label} Images API: no image in response [{endpoint_label}] "
+                        f"(mode={payload_mode}, attempt {attempt + 1}/{MAX_RETRIES}): {resp.text[:240]}",
+                        file=sys.stderr,
+                    )
+                    if attempt < MAX_RETRIES - 1:
+                        time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
+                        continue
+                    break
+                return img_data, round(time.time() - start, 2)
+
+            except Exception as e:
                 print(
-                    f"{engine_label} Images API: no image in response [{endpoint_label}] "
-                    f"(attempt {attempt + 1}/{MAX_RETRIES}): {resp.text[:240]}",
+                    f"{engine_label} Images API failed [{endpoint_label}] "
+                    f"(mode={payload_mode}, attempt {attempt + 1}/{MAX_RETRIES}): {e}",
                     file=sys.stderr,
                 )
                 if attempt < MAX_RETRIES - 1:
                     time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
                     continue
-                return None
-            return img_data, round(time.time() - start, 2)
+                break
 
-        except Exception as e:
-            print(f"{engine_label} Images API failed [{endpoint_label}] (attempt {attempt + 1}/{MAX_RETRIES}): {e}", file=sys.stderr)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                continue
-            return None
+        if mode_index < len(payload_modes) - 1:
+            print(
+                f"{engine_label} Images API {payload_mode} mode failed; retrying /images/edits with {payload_modes[mode_index + 1]} mode",
+                file=sys.stderr,
+            )
+
+    return None
 
 
 def _generate_via_chat_gpt(prompt: str, ref_image: Optional[str] = None, size: Optional[str] = None) -> Optional[tuple]:
@@ -560,11 +721,11 @@ def _generate_via_chat_gpt(prompt: str, ref_image: Optional[str] = None, size: O
 
 
 def _generate_via_direct_gpt(prompt: str, ref_image: Optional[str] = None, size: Optional[str] = None) -> Optional[tuple]:
-    """Call the configured GPT Image endpoint (text2img + img2img).
+    """Call the configured GPT Image endpoint in images/edits img2img mode.
 
     Args:
         prompt: Generation prompt
-        ref_image: Optional reference image path for img2img mode
+        ref_image: Required reference image path or public URL for img2img mode
         size: Optional output image size
 
     Returns:
@@ -577,31 +738,24 @@ def _generate_via_direct_gpt(prompt: str, ref_image: Optional[str] = None, size:
     if not GPTIMAGE_DIRECT_MODEL:
         print("ERROR: image_gen.gpt_model is required", file=sys.stderr)
         return None
+    if not ref_image:
+        print("ERROR: GPT Image is configured for image-to-image only; --ref-image is required", file=sys.stderr)
+        return None
 
     engine_label = _image_engine_label()
-    is_agnes = _is_agnes_model(GPTIMAGE_DIRECT_MODEL)
-    if not _is_explicit_chat_url(raw_base_url) and not _images_api_known_unsupported(raw_base_url):
-        result = _generate_via_images_api(prompt, ref_image, size, raw_base_url)
-        if result or _is_explicit_images_url(raw_base_url):
-            return result
-        if is_agnes:
-            reason = "unsupported" if _images_api_known_unsupported(raw_base_url) else "failed"
-            print(
-                f"{engine_label} Images API {reason}; not retrying chat-compatible GPT Image endpoint",
-                file=sys.stderr,
-            )
-            return None
-        if _images_api_known_unsupported(raw_base_url):
-            print("Images API unsupported; using chat-compatible GPT Image endpoint", file=sys.stderr)
-        else:
-            print("Images API failed; retrying chat-compatible GPT Image endpoint", file=sys.stderr)
-    elif is_agnes and not _is_explicit_chat_url(raw_base_url):
+    if _is_explicit_chat_url(raw_base_url):
         print(
-            f"{engine_label} Images API unsupported; not retrying chat-compatible GPT Image endpoint",
+            f"ERROR: {engine_label} must use images/edits; chat/completions URL is not allowed",
             file=sys.stderr,
         )
         return None
-    return _generate_via_chat_gpt(prompt, ref_image, size)
+    if _images_api_known_unsupported(raw_base_url):
+        print(
+            f"ERROR: {engine_label} Images API is marked unsupported for this endpoint; not falling back",
+            file=sys.stderr,
+        )
+        return None
+    return _generate_via_images_api(prompt, ref_image, size, raw_base_url)
 
 
 def generate(theme: str, send: bool = False, caption: bool = False,
@@ -644,13 +798,11 @@ def generate(theme: str, send: bool = False, caption: bool = False,
     engine_label = _image_engine_label()
     print(f"🎨 {engine_label} via {endpoint_label} ({requested_mode})...", file=sys.stderr)
 
+    if not ref_image:
+        print("ERROR: --ref-image is required; text2img fallback is disabled", file=sys.stderr)
+        return None
+
     result = _generate_via_direct_gpt(prompt, ref_image, size)
-    if not result and ref_image:
-        print(f"{engine_label} img2img failed via {endpoint_label}; retrying text2img without reference image", file=sys.stderr)
-        fallback_used = True
-        final_mode = "text2img"
-        used_ref_image = ""
-        result = _generate_via_direct_gpt(prompt, None, size)
 
     if not result:
         print(f"ERROR: {engine_label} endpoint failed: {endpoint_label}", file=sys.stderr)
@@ -676,7 +828,7 @@ def generate(theme: str, send: bool = False, caption: bool = False,
             "requested_ref_image_path": requested_ref_image,
             "fallback_used": fallback_used,
             "fallback_from": "img2img" if fallback_used else "",
-            "fallback_to": "text2img" if fallback_used else "",
+            "fallback_to": "",
         },
     )
 

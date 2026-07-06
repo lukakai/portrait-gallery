@@ -152,6 +152,9 @@ class ImageGenerator:
         no_auto_style: bool = False,
     ) -> Optional[str]:
         """根据穿搭描述生成图片，参考图由上层选择器决定。"""
+        if not ref_image:
+            logger.error("日程生图缺少参考图，已停止；不会降级为文生图")
+            return None
         return await self.generate(
             outfit_prompt,
             ref_image=ref_image,

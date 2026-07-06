@@ -556,6 +556,21 @@ def _read_custom_appearance() -> str:
     return (_runtime_persona().get("appearance") or "").strip()
 
 
+def _sanitize_appearance_for_image_prompt(appearance: str) -> str:
+    """Remove named-character/person inspiration phrases before image generation."""
+    text = re.sub(r"\s+", " ", str(appearance or "")).strip()
+    if not text:
+        return ""
+    text = re.sub(
+        r"\s+(?:inspired by|based on|resembling|looks like)\s+[^.,;，。；]+",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    text = re.sub(r"\s+from real life\b", "", text, flags=re.IGNORECASE)
+    return re.sub(r"\s+", " ", text).strip(" ,.;，。；")
+
+
 def _caption_activity(schedule_time: str = "") -> str:
     text = re.sub(r"\s+", " ", str(schedule_time or "")).strip()
     if not text:
@@ -971,6 +986,14 @@ def _strip_hair_color_from_schedule_hair(hair: str) -> str:
     return text or hair
 
 
+def _compact_time_constraint(text: str) -> str:
+    compact = re.sub(r"\s+", " ", str(text or "")).strip()
+    if not compact:
+        return ""
+    compact = re.split(r"\bForbidden time mismatch:", compact, maxsplit=1)[0].strip()
+    return compact.rstrip(" .") + "."
+
+
 def build_prompt(theme: str, extra_prompt: Optional[str] = None, schedule_activity: str = "",
                  outfit_keywords: str = "", scene_keywords: str = "", hair_keywords: str = "",
                  time_constraint: str = "", allow_random_pool: bool = False) -> str:
@@ -984,6 +1007,10 @@ def build_prompt(theme: str, extra_prompt: Optional[str] = None, schedule_activi
         print(f"🧬 Using runtime appearance from persona settings", file=sys.stderr)
     else:
         appearance = SEXY_APPEARANCE if is_sexy else APPEARANCE
+    sanitized_appearance = _sanitize_appearance_for_image_prompt(appearance)
+    if sanitized_appearance and sanitized_appearance != appearance:
+        appearance = sanitized_appearance
+        print("🧬 Removed named-character inspiration from image prompt appearance", file=sys.stderr)
 
     if extra_prompt:
         return f"{quality} {appearance} {extra_prompt}".strip()
@@ -1052,6 +1079,17 @@ def build_prompt(theme: str, extra_prompt: Optional[str] = None, schedule_activi
             if time_constraint:
                 print(f"🕒 Using schedule time constraint: {time_constraint[:80]}", file=sys.stderr)
             print(f"🎬 Using LLM schedule scene directly: {schedule_activity[:60]}", file=sys.stderr)
+            compact_lighting = _compact_time_constraint(time_constraint) or "realistic lighting that matches the scheduled time and indoor scene."
+            return (
+                f"{quality} {appearance}. "
+                f"Current scheduled scene: {schedule_activity}. "
+                + (f"Hair color must follow the character appearance exactly: {hair_color}. " if hair_color else "")
+                + f"Hairstyle/accessories: {hair}; keep the appearance hair color even if the reference image differs. "
+                f"Outfit: {clothing}. "
+                f"Action and pose: naturally engaged in the scheduled activity, with hands, props, expression, head direction, and eye line matching that activity. "
+                f"Background: {environment}. "
+                f"Lighting: {compact_lighting}"
+            )
         else:
             pose = random.choice(theme_cfg["pose"])
             environment = random.choice(theme_cfg["env"])

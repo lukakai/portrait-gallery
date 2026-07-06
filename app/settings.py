@@ -6,7 +6,6 @@ import os
 import re
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlparse
 
 import yaml
 
@@ -1014,14 +1013,6 @@ def _split_no_proxy(value: Any) -> list[str]:
     return [item for item in re.split(r"[\s,]+", text) if item]
 
 
-def _host_from_url(value: Any) -> str:
-    text = _non_empty(value)
-    if not text:
-        return ""
-    parsed = urlparse(text if "://" in text else f"http://{text}")
-    return parsed.hostname or ""
-
-
 def merge_no_proxy(*values: Any) -> str:
     merged: list[str] = []
     for value in values:
@@ -1152,19 +1143,11 @@ def apply_network_env(config: dict, env: dict[str, str] | None = None, data_dir:
         for env_name in env_names:
             target[env_name] = value
 
-    keys = load_json_file(api_keys_path(data_dir)) if data_dir else {}
-    dynamic_no_proxy_hosts = [
-        _host_from_url(keys.get("gpt_base_url")),
-        _host_from_url(keys.get("cpa_url")),
-        _host_from_url(get_nested(config, "image_gen.gpt_base_url", "")),
-        _host_from_url(get_nested(config, "llm.base_url", "")),
-    ]
     no_proxy = merge_no_proxy(
         target.get("NO_PROXY", ""),
         target.get("no_proxy", ""),
         network.get("no_proxy", ""),
         ",".join(DEFAULT_NO_PROXY_HOSTS),
-        ",".join(host for host in dynamic_no_proxy_hosts if host),
     )
     if no_proxy:
         target["NO_PROXY"] = no_proxy

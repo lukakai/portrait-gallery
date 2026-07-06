@@ -305,6 +305,15 @@ class PortraitGalleryApp:
             "group_chat",
         }
 
+    @staticmethod
+    def _reference_arg_for_generation(selected_reference: dict) -> str:
+        if not isinstance(selected_reference, dict):
+            return ""
+        ref_url = str(selected_reference.get("url") or "").strip()
+        if ref_url.startswith(("http://", "https://")):
+            return ref_url
+        return str(selected_reference.get("path") or "").strip()
+
     async def _select_reference_for_generation(self, context: dict, include_wardrobe: Optional[bool] = None) -> dict:
         source = str((context or {}).get("source") or "").strip().lower()
         if include_wardrobe is None:
@@ -711,12 +720,16 @@ class PortraitGalleryApp:
                 "schedule": entry.schedule,
                 "schedule_details": entry.schedule_details,
             })
+            reference_arg = self._reference_arg_for_generation(selected_reference)
+            if not reference_arg:
+                logger.error("初始日程生图缺少参考图，已停止；不会降级为文生图")
+                return entry
             filename = await self.image_gen.generate_for_outfit(
                 entry.prompt,
                 entry.outfit_style,
                 entry.base_style,
-                ref_image=selected_reference.get("path", ""),
-                no_auto_style=not bool(selected_reference.get("path")),
+                ref_image=reference_arg,
+                no_auto_style=False,
             )
             if filename:
                 entry.image_filename = filename
@@ -2675,6 +2688,8 @@ class PortraitGalleryApp:
             reasons.append("GPT Image 上游 504")
         elif "path not found" in lower or "images api error 404" in lower:
             reasons.append("当前中转不支持 Images API，已尝试 chat 兼容生图")
+        elif "cannot read reference image" in lower:
+            reasons.append("图生图参考图读取失败，请检查参考图文件是否存在")
 
         if (
             "no base64 image in response" in lower
@@ -2840,15 +2855,31 @@ class PortraitGalleryApp:
             "schedule_prompt": daily_entry.get("schedule_prompt", ""),
             "schedule_details": daily_entry.get("schedule_details", []),
         })
-        if selected_reference.get("path"):
-            cmd.extend(["--ref-image", selected_reference["path"]])
+        reference_arg = self._reference_arg_for_generation(selected_reference)
+        if reference_arg:
+            cmd.extend(["--ref-image", reference_arg])
             logger.info(
                 "定时生图选择参考图: %s mode=%s",
                 selected_reference.get("label") or selected_reference.get("filename"),
                 selected_reference.get("selection_mode", ""),
             )
         else:
-            cmd.append("--no-auto-style")
+            detail = "日程生图缺少参考图，已停止；不会降级为文生图"
+            logger.error(detail)
+            if slot_key:
+                self._failed_photo_jobs[slot_key] = {
+                    "theme": theme,
+                    "time": time_text,
+                    "activity": activity,
+                    "failed_at": datetime.now().isoformat(),
+                    "error": detail,
+                    "error_summary": "缺少参考图，无法执行图生图",
+                }
+                self._save_failed_photo_jobs()
+            if reserved_slot:
+                async with self._inflight_lock:
+                    self._clear_photo_job_inflight(slot_key)
+            return False
         if schedule_time:
             cmd.extend(["--schedule-time", schedule_time])
         try:

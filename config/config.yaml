@@ -17,7 +17,7 @@ schedule:
     end: '23:59'
 llm:
   base_url: ''
-  model: deepseek-v4-flash
+  model: gemini-3.1-pro-preview-low
   fallback_model: deepseek-v4-flash
   enhance_max_tokens: 400
   enhance_temperature: 0.85
@@ -71,7 +71,6 @@ paths:
 integrations:
   send_enabled: true
   push_channel: wechat
-  hermes_cli: ''
   wechat_target: weixin
 update:
   github_api: ''

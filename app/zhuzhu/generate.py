@@ -496,7 +496,7 @@ def _schedule_detail_map(details) -> dict:
     return mapped
 
 
-def _nearest_schedule_detail(details, time_slot: str, max_distance: int = 60) -> tuple[str, dict]:
+def _nearest_schedule_detail(details, time_slot: str, max_distance: int = 180) -> tuple[str, dict]:
     if not isinstance(details, list):
         return "", {}
     target = _normalize_schedule_detail_time(time_slot)
@@ -545,7 +545,18 @@ def _schedule_detail_text(detail: dict) -> str:
 def _schedule_detail_keywords(detail: dict, fallback_outfit: str = "") -> tuple[str, str, str]:
     if not isinstance(detail, dict):
         return fallback_outfit, "", ""
-    outfit = re.sub(r"\s+", " ", str(detail.get("outfit_en", "") or fallback_outfit)).strip()
+    outfit_raw = re.sub(r"\s+", " ", str(detail.get("outfit_en", "") or "")).strip()
+    # 检测 LLM 返回的模板占位符（如 "today's outfit in concise English"）
+    _VAGUE_PATTERNS = ("today's outfit", "the outfit from", "the schedule describes",
+                       "today's schedule", "outfit in concise english",
+                       "today's hairstyle", "the hairstyle from", "unspecified", "unknown",
+                       "outfit described in", "hairstyle described in")
+    _is_vague = (not outfit_raw
+                 or len(outfit_raw.split()) < 4
+                 or any(p in outfit_raw.lower() for p in _VAGUE_PATTERNS))
+    outfit = fallback_outfit if _is_vague else outfit_raw
+    if _is_vague and outfit_raw:
+        print(f"👔 LLM outfit_en is vague placeholder; using schedule outfit_keywords instead: {outfit_raw[:60]!r} -> {fallback_outfit[:60]}", file=sys.stderr)
     hair = re.sub(r"\s+", " ", str(detail.get("hair_en", ""))).strip()
     hair = _strip_hair_color_from_schedule_hair(hair)
     scene_parts = []
@@ -661,11 +672,16 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "", schedule
             raw_time = _normalize_schedule_detail_time(raw_slot)
             time_constraint = _schedule_time_constraint(raw_time)
             detail = schedule_detail_override if isinstance(schedule_detail_override, dict) else {}
+            detail_time = raw_time if detail else ""
             if not detail:
                 detail = detail_by_time.get(raw_time, {})
+                if detail:
+                    detail_time = raw_time
+            if not detail:
+                detail_time, detail = _nearest_schedule_detail(schedule_details, raw_slot)
             detail = _schedule_detail_for_time(detail, raw_time)
-            prompt_time, prompt_match = _find_schedule_slot(schedule_prompt, raw_slot, max_distance=0)
-            display_time, display_match = _find_schedule_slot(schedule, raw_slot, max_distance=0)
+            prompt_time, prompt_match = _find_schedule_slot(schedule_prompt, detail_time or raw_slot, max_distance=0)
+            display_time, display_match = _find_schedule_slot(schedule, detail_time or raw_slot, max_distance=0)
             prompt_activity = _schedule_detail_text(detail) or prompt_match or activity
             detail_outfit_kw, detail_scene_kw, detail_hair_kw = _schedule_detail_keywords(detail, outfit_kw)
             detail_scene_kw = _append_time_constraint(detail_scene_kw, time_constraint)
@@ -685,9 +701,13 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "", schedule
             if h_match:
                 raw_time = _normalize_schedule_detail_time(raw_slot)
                 time_constraint = _schedule_time_constraint(raw_time)
-                detail = _schedule_detail_for_time(detail_by_time.get(raw_time), raw_time)
-                best = _schedule_detail_text(detail) or _find_schedule_activity(schedule_prompt or schedule, raw_slot)
-                display_best = _find_schedule_activity(schedule, raw_slot) or best
+                detail = detail_by_time.get(raw_time) or {}
+                detail_time = raw_time if detail else ""
+                if not detail:
+                    detail_time, detail = _nearest_schedule_detail(schedule_details, raw_slot)
+                detail = _schedule_detail_for_time(detail, raw_time)
+                best = _schedule_detail_text(detail) or _find_schedule_activity(schedule_prompt or schedule, detail_time or raw_slot)
+                display_best = _find_schedule_activity(schedule, detail_time or raw_slot, max_distance=0) or _find_schedule_activity(schedule, raw_slot) or best
                 if best:
                     detail_outfit_kw, detail_scene_kw, detail_hair_kw = _schedule_detail_keywords(detail, outfit_kw)
                     detail_scene_kw = _append_time_constraint(detail_scene_kw, time_constraint)
@@ -860,7 +880,6 @@ def generate(
                                        scene_keywords=scene_kw,
                                        hair_keywords=hair_kw,
                                        time_constraint=schedule_time_constraint)
-        resolved_prompt = f"{resolved_prompt}. {schedule_ctx}"
         print(f"🎨 Rebuilt prompt from LLM schedule line (outfit_kw={outfit_kw[:40]})", file=sys.stderr)
     elif theme in DAILY_THEMES and not prompt_final and not prompt_override:
         print(
@@ -872,6 +891,11 @@ def generate(
     if not resolved_prompt:
         print(f"ERROR: prompt is empty for theme={theme}; generation aborted", file=sys.stderr)
         return None
+    prompt_preview = re.sub(r"\s+", " ", resolved_prompt).strip()[:260]
+    print(
+        f"🧾 Resolved prompt length: chars={len(resolved_prompt)}, bytes={len(resolved_prompt.encode('utf-8'))}, preview={prompt_preview}",
+        file=sys.stderr,
+    )
 
     # Resolve style to ref_image path (only supported by gptimage engine)
     requested_ref_image = ref_image
@@ -883,7 +907,8 @@ def generate(
             return None
         ref_image = requested_ref_image or STYLE_REF_MAP.get(style)
         if not ref_image:
-            print(f"⚠️ style '{style}' 参考图不存在，将使用纯文生图", file=sys.stderr)
+            print(f"ERROR: style '{style}' 参考图不存在，图生图已停止", file=sys.stderr)
+            return None
 
     # Auto style classification is label-only. The app-level reference profile
     # selector is responsible for choosing actual image-to-image references.
@@ -916,6 +941,9 @@ def generate(
         if path:
             used_model = GITEE_MODEL_NAME
     elif engine == "gptimage":
+        if not ref_image:
+            print("ERROR: GPT Image 日程生图必须提供 --ref-image，禁止文生图", file=sys.stderr)
+            return None
         path = generate_with_gptimage(
             theme,
             send=False,
@@ -932,22 +960,7 @@ def generate(
         if path:
             used_model = GPTIMAGE_DIRECT_MODEL
         if not path:
-            if _gitee_fallback_enabled():
-                print("GPT Image failed, falling back to Gitee", file=sys.stderr)
-                path = generate_with_gitee(
-                    theme,
-                    send=False,
-                    caption=False,
-                    prompt_override=resolved_prompt,
-                    prompt_is_final=True,
-                    source=source,
-                    sync_gallery=False,
-                    schedule_time=schedule_raw,
-                )
-                if path:
-                    used_model = GITEE_MODEL_NAME
-            else:
-                print("GPT Image failed; Gitee fallback is disabled", file=sys.stderr)
+            print("GPT Image image-to-image attempts failed; text-to-image fallback is disabled", file=sys.stderr)
     elif engine == "gemini":
         path = _generate_with_gemini_cpa(theme, resolved_prompt)
         if path:

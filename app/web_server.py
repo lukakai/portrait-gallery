@@ -260,6 +260,7 @@ class GalleryServer:
         self._wardrobe_image_locks: dict[str, asyncio.Lock] = {}
         self._manual_send_lock = asyncio.Lock()
         self._manual_send_cooldown_until = 0.0
+        self._generate_now_lock = asyncio.Lock()
         self._restart_scheduled = False
         os.makedirs(self.default_image_dir, exist_ok=True)
         os.makedirs(self.image_dir, exist_ok=True)
@@ -316,11 +317,10 @@ class GalleryServer:
             remote_ip = ipaddress.ip_address(remote)
             if remote_ip.is_loopback:
                 return True
-            # Docker Desktop / bridge networking can make a host browser opened at
-            # localhost appear to aiohttp as the private bridge gateway. Keep
-            # that local-only flow usable without treating arbitrary hostnames
-            # as trusted.
-            return bool(host_is_local and remote_ip.is_private)
+            # Allow local LAN clients to use the private gallery UI.
+            if remote_ip.is_private:
+                return True
+            return False
         except ValueError:
             return host_is_local
 
@@ -617,8 +617,12 @@ class GalleryServer:
             return "该次文本模型请求当时没有拿到响应，不等于模型不可用；如果后续已有成功记录，可以忽略这条旧错误。"
         if "request_failed" in low or "请求超时" in low:
             return "该次请求没有在超时时间内完成，请看原始错误里的超时或连接原因。"
+        if "text-to-image fallback is disabled" in low:
+            return "图生图尝试已失败；按当前要求不会降级成文生图。"
         if "fallback is disabled" in low:
             return "Gitee 回退没有开启，GPT Image 失败后不会自动改走 Gitee。"
+        if "cannot read reference image" in low:
+            return "图生图参考图读取失败，请检查参考图文件是否存在。"
         if "content_policy_violation" in low or "safety system" in low:
             return "上游安全策略拒绝了这次图片请求，请调整提示词或参考图后重试。"
         if "lookup" in low and (
@@ -881,6 +885,8 @@ class GalleryServer:
             return "Agnes 图生图失败，正在改用 Agnes 文生图重试。"
         if text.startswith("GPT Image img2img failed"):
             return "图生图失败，正在改用文生图重试。"
+        if text.startswith("GPT Image image-to-image attempts failed"):
+            return "GPT Image 图生图尝试全部失败；不会降级成文生图。"
         if text.startswith("GPT Image failed; Gitee fallback is disabled"):
             return "GPT Image 失败，Gitee 回退没有开启。"
         if text.startswith("ERROR: GPT Image endpoint failed"):
@@ -3551,6 +3557,11 @@ class GalleryServer:
                     return fallback
             return cleaned
 
+        if (entry.get("source") or "") == "web" and isinstance(entry.get("schedule_now_detail"), dict):
+            detail_activity = self._clean_activity_text(entry["schedule_now_detail"].get("activity_zh", ""), max_len=64)
+            if detail_activity:
+                return detail_activity
+
         fallback = self._clean_activity_text(self._photo_schedule_activity(entry), max_len=64)
         if fallback:
             return fallback
@@ -4248,7 +4259,7 @@ class GalleryServer:
 
     async def _fetch_model_ids(self, base_url: str, api_key: str = "", timeout_seconds: int = 6) -> tuple[list[str], str]:
         endpoint = f"{base_url.rstrip('/')}/models"
-        headers = {}
+        headers = {"User-Agent": "PortraitGallery/1.0"}
         if api_key:
             headers["Authorization"] = f"Bearer {api_key}"
         timeout = aiohttp.ClientTimeout(total=timeout_seconds)
@@ -4273,23 +4284,6 @@ class GalleryServer:
             cpa_key = request_config["api_key"]
             if not base_url:
                 return web.json_response({"models": [], "error": "CPA URL 未配置"})
-
-            if base_url.endswith("/chat/completions"):
-                base_url = base_url[: -len("/chat/completions")]
-            if not base_url.endswith("/v1"):
-                base_url = f"{base_url}/v1"
-
-            headers = {"User-Agent": "PortraitGallery/1.0"}
-            if cpa_key:
-                headers["Authorization"] = f"Bearer {cpa_key}"
-
-            resp = requests.get(f"{base_url}/models", headers=headers, timeout=5)
-            if resp.status_code == 200:
-                data = resp.json()
-                models = sorted([m["id"] for m in data.get("data", [])])
-                return web.json_response({"models": models})
-            else:
-                return web.json_response({"models": [], "error": f"CPA returned {resp.status_code}"})
 
             models, error = await self._fetch_model_ids(base_url, cpa_key, timeout_seconds=5)
             if error:
@@ -4918,14 +4912,23 @@ class GalleryServer:
         if not selected:
             return {}
         path = resolve_reference_profile_path(selected, self.reference_dir, self.app_reference_dir)
-        if not path:
-            return {}
         result = reference_profile_response(selected)
+        if not path and not str(result.get("url") or "").startswith(("http://", "https://")):
+            return {}
         result["path"] = path
         result["selection_mode"] = selected.get("selection_mode", "")
         result["selection_reason"] = selected.get("selection_reason", "")
         result["random_fallback"] = bool(selected.get("random_fallback"))
         return result
+
+    @staticmethod
+    def _reference_arg_for_generation(selected_reference: dict) -> str:
+        if not isinstance(selected_reference, dict):
+            return ""
+        ref_url = str(selected_reference.get("url") or "").strip()
+        if ref_url.startswith(("http://", "https://")):
+            return ref_url
+        return str(selected_reference.get("path") or "").strip()
 
     def _iter_uploaded_refs(self) -> list[dict]:
         refs = []
@@ -7629,6 +7632,42 @@ class GalleryServer:
         )
         return any(phrase in text for phrase in generic_phrases)
 
+    def _schedule_generate_now_detail(self, now: datetime, daily: dict) -> dict:
+        """Build current detail from persisted schedule_details only."""
+        now_str = now.strftime("%H:%M")
+        target = now.hour * 60 + now.minute
+        details = daily.get("schedule_details") if isinstance(daily, dict) else []
+        best = {}
+        best_time = ""
+        best_dist = 9999
+        if isinstance(details, list):
+            for item in details:
+                if not isinstance(item, dict):
+                    continue
+                time_text, _ = self._parse_time_activity(item.get("time", ""))
+                if not time_text:
+                    continue
+                minutes = self._time_sort_value(time_text)
+                dist = abs(minutes - target)
+                if dist < best_dist:
+                    best = item
+                    best_time = time_text
+                    best_dist = dist
+
+        if not best or best_dist > 180:
+            return self._fallback_generate_now_detail(now, daily)
+
+        detail = {"time": now_str, "schedule_slot_time": best_time}
+        for field in ("activity_zh", "activity_en", "action_en", "scene_en", "props_en", "outfit_en", "hair_en", "lighting_en"):
+            value = re.sub(r"\s+", " ", str(best.get(field, "") or "")).strip()
+            if value:
+                detail[field] = value
+        if not detail.get("activity_zh"):
+            nearest = self._nearest_schedule_item(daily.get("schedule", "") if isinstance(daily, dict) else "", now)
+            if nearest.get("activity"):
+                detail["activity_zh"] = nearest["activity"]
+        return detail
+
     @staticmethod
     def _clean_generate_now_en(value: str, limit: int = 220) -> str:
         text = re.sub(r"\s+", " ", str(value or "")).strip().strip('"').strip("'")
@@ -7852,6 +7891,16 @@ JSON 格式：
     async def handle_generate_now(self, request: web.Request):
         """根据今日日程的当前时间点生图 (💭 现在在干嘛)"""
         proc = None
+        if self._generate_now_lock.locked():
+            return web.json_response({
+                "error": "already_running",
+                "message": "现在在干嘛正在生图中，请等这一张完成后再试。",
+            }, status=409)
+        async with self._generate_now_lock:
+            return await self._handle_generate_now_locked(request)
+
+    async def _handle_generate_now_locked(self, request: web.Request):
+        proc = None
         try:
             # B1 (2026-06-26): 可选 extra_hint，让聊天生图能在日程活动上叠加主人微调
             extra_hint = ""
@@ -7882,7 +7931,7 @@ JSON 格式：
                     "message": "今日日程里没有可用于生图的时间点。",
                 }, status=400)
 
-            now_detail = await self._infer_generate_now_detail(now, daily)
+            now_detail = self._schedule_generate_now_detail(now, daily)
             now_activity = self._clean_activity_text(now_detail.get("activity_zh", ""), max_len=72)
             if not now_activity:
                 return web.json_response({
@@ -7892,13 +7941,15 @@ JSON 格式：
 
             now_detail["time"] = now_str
             now_detail["activity_zh"] = now_activity
-            # B1 (2026-06-26): 把主人微调 hint 叠加进活动与日程时间，影响 prompt/参考图选择
+            # B1 (2026-06-26): 把主人微调 hint 叠加进 WebUI 展示活动。
             if extra_hint:
                 now_activity = self._clean_activity_text(f"{now_activity}，{extra_hint}", max_len=96)
                 now_detail["activity_zh"] = now_activity
                 now_detail["extra_hint"] = extra_hint
-            schedule_time = f"{now_str} {now_activity}".strip()
-            schedule_detail_json = json.dumps(now_detail, ensure_ascii=False, separators=(",", ":"))
+            # Pass only the clock time into generate.py. The image prompt must be
+            # built from today's persisted schedule_details, not a second LLM
+            # interpretation of the current moment.
+            schedule_time = now_str
             theme = self._theme_for_schedule_time(now_str)
             base_style = str(daily.get("base_style") or "").strip().lower()
             if base_style not in {"cool", "girly", "sweet"}:
@@ -7925,10 +7976,10 @@ JSON 格式：
             gitee_keys = plugin_config.get("gitee_config", {}).get("api_keys", [])
             gitee_key = gitee_keys[0] if gitee_keys else ""
             gpt_available = bool(str(gpt_base_url or "").strip() or str(gpt_key or "").strip())
-            if not gpt_available and not gitee_key:
+            if not gpt_available:
                 return web.json_response({
                     "error": "missing_image_key",
-                    "message": "请先在设置里配置 GPT Image Base URL 或 Gitee Key，再使用“现在在干嘛”。",
+                    "message": "请先在设置里配置 GPT Image Base URL，再使用“现在在干嘛”。",
                 }, status=400)
 
             # 2) 调用统一日程生图链路。generate.py 会根据 schedule_time 读取
@@ -7936,73 +7987,12 @@ JSON 格式：
             request_config = llm_request_config(self.config, self.data_dir)
             cpa_base_url = request_config["base_url"]
             cpa_key = request_config["api_key"]
-            cpa_url = request_config["chat_url"]
-
-            schedule_hint = f"\n今日日程参考：\n{schedule_text}" if schedule_text else ""
-            favorite_context = self._favorite_outfit_generation_context()
-            favorite_hint = (
-                "\n收藏穿搭偏好（只用于 outfit_en 的服饰审美参考，不能用于动作、场景或日程）：\n"
-                f"{favorite_context}"
-                if favorite_context else ""
-            )
-            llm_prompt = (
-                f"现在是 {now_str}。{schedule_hint}{favorite_hint}\n\n"
-                "请根据当前时间和日程生成三个字段，只输出 JSON：\n"
-                "{\n"
-                '  "activity_zh": "给 WebUI 展示的中文活动，15-30 个汉字，不要带时间",\n'
-                '  "image_prompt_en": "给 AI 生图用的英文场景描述，25-55 words, no Chinese, include pose/action/scene/props/lighting, do not include character appearance, quality prefix, or clothing",\n'
-                '  "outfit_en": "英文服装描述，8-20 words, must name visible clothing, shoes/accessories if visible, no Chinese"\n'
-                "}\n"
-                "activity_zh 必须中文；image_prompt_en 和 outfit_en 必须纯英文。\n"
-                "如果有收藏穿搭偏好，outfit_en 只提取其发型/服装气质、配色、版型、材质和搭配层次做软参考，生成相近但新的组合；不要照抄旧单品或旧描述。\n"
-                "收藏偏好绝不能影响 activity_zh 或 image_prompt_en 的动作、场景、道具、日程安排。不要解释。"
-            )
-
-            activity = ""
-            image_prompt = ""
-            outfit_prompt = ""
-            llm_models = request_config["models"] if cpa_url else []
-
-            for model_name in llm_models:
-                try:
-                    body = _json.dumps({
-                        "model": model_name,
-                        "messages": [{"role": "user", "content": llm_prompt}],
-                        "max_tokens": 220,
-                    }).encode()
-                    req = urllib.request.Request(
-                        cpa_url, data=body,
-                        headers={
-                            "Content-Type": "application/json",
-                            "User-Agent": "PortraitGallery/1.0",
-                            **( {"Authorization": f"Bearer {cpa_key}"} if cpa_key else {}),
-                        },
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(req, timeout=15) as resp:
-                        resp_data = _json.loads(resp.read())
-                        msg = resp_data["choices"][0]["message"]
-                        raw_content = (msg.get("content") or msg.get("reasoning_content") or "").strip()
-                        activity, image_prompt, outfit_prompt = self._parse_generate_now_llm(raw_content)
-                    if activity and image_prompt and outfit_prompt:
-                        break
-                except Exception as e:
-                    logger.warning(f"LLM activity generation failed with {model_name}: {e}")
-
-            if not activity or not image_prompt or not outfit_prompt:
-                fallback_activity, fallback_prompt, fallback_outfit = self._fallback_generate_now_context(now_str, schedule_text)
-                activity = activity or fallback_activity
-                image_prompt = image_prompt or fallback_prompt
-                outfit_prompt = outfit_prompt or fallback_outfit
-            schedule_time = f"{now_str} {activity}".strip()
-            image_prompt = f"{image_prompt}. She is wearing {outfit_prompt}."
-
-            logger.info(f"LLM generated activity: {activity}; image_prompt_en={image_prompt[:80]}")
+            logger.info("Generate now uses persisted schedule details: schedule_time=%s", schedule_time)
 
             # 3) 调用 generate.py --theme custom --prompt <activity>，用 GPT Image 直连出图
 
             generate_script = self._generate_script()
-            engine = self.config.get("image_gen", {}).get("default_engine", "gptimage") if gpt_available else "gitee"
+            engine = "gptimage"
             child_env_extra = {}
             if gpt_base_url:
                 child_env_extra["GPT_IMAGE_BASE_URL"] = gpt_base_url
@@ -8045,17 +8035,20 @@ JSON 格式：
                 "--source", "web",
                 "--engine", engine,
                 "--schedule-time", schedule_time,
-                "--schedule-detail-json", schedule_detail_json,
             ]
-            if selected_reference.get("path") and engine == "gptimage":
-                cmd.extend(["--ref-image", selected_reference["path"]])
+            reference_arg = self._reference_arg_for_generation(selected_reference)
+            if reference_arg and engine == "gptimage":
+                cmd.extend(["--ref-image", reference_arg])
                 logger.info(
                     "Generate now selected reference: %s mode=%s",
                     selected_reference.get("label") or selected_reference.get("filename"),
                     selected_reference.get("selection_mode", ""),
                 )
             else:
-                cmd.append("--no-auto-style")
+                return web.json_response({
+                    "error": "reference_required",
+                    "message": "没有选到可用参考图，无法执行图生图。",
+                }, status=500)
             proc = await asyncio.create_subprocess_exec(
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
@@ -8072,11 +8065,17 @@ JSON 格式：
                 if "GPT_IMAGE_API_KEY or gpt_key is required" in detail:
                     return web.json_response({
                         "error": "missing_image_key",
-                        "message": "请先在设置里配置 GPT Image Base URL 或 Gitee Key，再使用“现在在干嘛”。",
+                        "message": "请先在设置里配置 GPT Image Base URL，再使用“现在在干嘛”。",
                     }, status=400)
+                if "cannot read reference image" in detail:
+                    return web.json_response({
+                        "error": "reference_image_unreadable",
+                        "message": "图生图参考图读取失败，请检查参考图文件是否存在。",
+                        "detail": detail[-300:],
+                    }, status=500)
                 return web.json_response({
                     "error": "generate_failed",
-                    "message": "生图失败，请检查 GPT Image/Gitee 配置或稍后重试。",
+                    "message": "生图失败，请检查 GPT Image 配置或稍后重试。",
                     "detail": detail[-300:],
                 }, status=500)
 
@@ -8091,13 +8090,19 @@ JSON 格式：
 
             # Parse caption if present
             caption_text = self._parse_stdout_caption(stdout_text)
+            display_schedule_time = f"{now_str} {now_activity}".strip()
+            response_schedule_time = display_schedule_time
 
             # Update schedule_data.json: set source="web" for this entry
             store = ScheduleStore(self.data_dir)
             def _update_source(all_data):
+                nonlocal response_schedule_time
                 if filename in all_data:
                     all_data[filename]["source"] = "web"
-                    all_data[filename]["schedule_time"] = schedule_time
+                    existing_schedule_time = str(all_data[filename].get("schedule_time") or "").strip()
+                    _existing_time, existing_activity = self._parse_time_activity(existing_schedule_time)
+                    response_schedule_time = existing_schedule_time if existing_activity else display_schedule_time
+                    all_data[filename]["schedule_time"] = response_schedule_time
                     all_data[filename]["schedule_now_detail"] = now_detail
                     all_data[filename]["time"] = all_data[filename].get("time") or now_str
                     for field in ("outfit_style", "base_style", "reference_query"):
@@ -8124,7 +8129,7 @@ JSON 格式：
                 "image_path": f"/images/{filename}",
                 "caption": caption_text,
                 "source": "web",
-                "schedule_time": schedule_time,
+                "schedule_time": response_schedule_time,
                 "schedule_now_detail": now_detail,
                 "outfit_style": daily.get("outfit_style", ""),
                 "base_style": base_style,

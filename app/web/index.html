@@ -7689,7 +7689,8 @@ async function triggerGenerate() {
     if (data.error) {
       showToast("❌ " + (data.message || data.error));
     } else {
-      showToast("✨ 新图生成完成～");
+      const sceneText = String(data.schedule_time || data.schedule_now_detail?.activity_zh || "").trim();
+      showToast(sceneText ? `✨ ${sceneText}` : "✨ 新图生成完成～", sceneText ? 5200 : 3000);
       await loadGallery();
     }
   } catch(e) {
