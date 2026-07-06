@@ -27,9 +27,23 @@ from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from data import DailyEntry
 from scheduler import DailyScheduler
 from image_gen import ImageGenerator
+from photo_plan_edit import (
+    normalize_schedule_clock,
+    replace_schedule_activity,
+    update_schedule_details_activity,
+)
 from web_server import GalleryServer
 from store import ScheduleStore
+from text_repair import repair_mojibake_text
+from characters import (
+    LOCAL_CHARACTER_SOURCE,
+    build_character_prompt,
+    build_group_prompt,
+    load_character_registry,
+    upsert_manual_character,
+)
 from settings import (
+    DEFAULT_QUALITY_PREFIX,
     api_keys_path,
     apply_network_env,
     auto_push_agent,
@@ -76,6 +90,8 @@ WECHAT_RETRYABLE_MARKERS = (
     "temporarily unavailable",
 )
 REFERENCE_IMAGE_EXTENSIONS = (".jpg", ".jpeg", ".png", ".webp", ".gif")
+REFERENCE_METADATA_KEYS = ("id", "filename", "url", "label", "prompt", "source", "selection_mode", "selection_reason")
+TODAY_SCHEDULE_REFERENCE_MODE = "today_schedule"
 LOG_RETENTION_DAYS = 3
 LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s: %(message)s"
 
@@ -177,6 +193,8 @@ def save_schedule_entry(data_dir: str, entry: DailyEntry):
     store = ScheduleStore(data_dir)
     try:
         entry_dict = entry.to_dict()
+        if "caption" in entry_dict:
+            entry_dict["caption"] = repair_mojibake_text(entry_dict.get("caption", "")).strip()
         img_filename = entry.image_filename or ""
         if img_filename:
             for field in ("schedule", "schedule_prompt", "schedule_details"):
@@ -252,10 +270,14 @@ class PortraitGalleryApp:
         self.web_server.on_image_dir_changed = self.image_gen.set_output_dir
         self.web_server.on_generate_today = self.generate_and_save
         self.web_server.on_generate_custom = self.generate_custom
+        self.web_server.on_generate_character = self.generate_character
+        self.web_server.on_generate_character_reference = self.generate_character_reference
+        self.web_server.on_generate_group = self.generate_group
         self.web_server.on_list_photo_jobs = self.list_photo_jobs
         self.web_server.on_refresh_schedule = self.refresh_schedule
         self.web_server.on_rebuild_photo_jobs = self.rebuild_photo_jobs
         self.web_server.on_retry_photo_job = self.retry_photo_job
+        self.web_server.on_update_photo_plan = self.update_photo_plan
         self.web_server.on_reroll_image = self.reroll_image
 
         # APScheduler
@@ -280,6 +302,7 @@ class PortraitGalleryApp:
             "cron",
             "cron_reroll",
             "generate_now",
+            "group_chat",
         }
 
     async def _select_reference_for_generation(self, context: dict, include_wardrobe: Optional[bool] = None) -> dict:
@@ -295,6 +318,172 @@ class PortraitGalleryApp:
                 include_wardrobe=include_wardrobe,
             ),
         )
+
+    @staticmethod
+    def _selected_reference_metadata(selected_reference: dict) -> dict:
+        if not isinstance(selected_reference, dict):
+            return {}
+        return {
+            key: selected_reference.get(key, "")
+            for key in REFERENCE_METADATA_KEYS
+            if selected_reference.get(key, "") not in ("", None)
+        }
+
+    def _resolve_selected_reference_path(self, selected_reference: dict) -> str:
+        if not isinstance(selected_reference, dict):
+            return ""
+        resolver = getattr(getattr(self, "web_server", None), "_resolve_reference_image", None)
+        filename = str(selected_reference.get("filename") or "").strip()
+        candidates = [
+            selected_reference.get("path", ""),
+            selected_reference.get("url", ""),
+            filename,
+        ]
+        if filename:
+            candidates.extend([f"/local-refs/{filename}", f"/refs/{filename}"])
+        for value in candidates:
+            raw = str(value or "").strip()
+            if not raw:
+                continue
+            if callable(resolver):
+                resolved = resolver(raw, allow_any_path=True)
+                if resolved:
+                    return resolved
+            expanded = os.path.abspath(os.path.expanduser(raw))
+            if os.path.isfile(expanded):
+                return expanded
+        return ""
+
+    @staticmethod
+    def _schedule_entry_time_sort_value(entry: dict) -> int:
+        for field in ("schedule_time", "time"):
+            match = re.match(r"\s*(\d{1,2}):(\d{2})", str((entry or {}).get(field) or ""))
+            if match:
+                return int(match.group(1)) * 60 + int(match.group(2))
+        return -1
+
+    def _saved_today_schedule_reference(self) -> dict:
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        try:
+            all_data = ScheduleStore(self.data_dir).load()
+        except Exception as e:
+            logger.error("读取今日日程参考图失败: %s", e)
+            return {}
+
+        candidates: list[tuple[int, dict, dict, str]] = []
+        for entry in all_data.values():
+            if not isinstance(entry, dict):
+                continue
+            if entry.get("date") != today_str or not entry.get("image_filename"):
+                continue
+            if str(entry.get("source") or "").strip() not in TODAY_PHOTO_SOURCES:
+                continue
+            selected = entry.get("selected_reference") if isinstance(entry.get("selected_reference"), dict) else {}
+            path = self._resolve_selected_reference_path(selected)
+            if not path:
+                continue
+            candidates.append((self._schedule_entry_time_sort_value(entry), entry, selected, path))
+        if not candidates:
+            return {}
+
+        _, entry, selected, path = max(candidates, key=lambda item: item[0])
+        result = dict(selected)
+        result["path"] = path
+        result.setdefault("selection_mode", "saved_schedule")
+        result.setdefault("selection_reason", f"saved_schedule:{entry.get('schedule_time') or entry.get('time') or ''}")
+        return result
+
+    async def _today_schedule_reference_for_generation(
+        self,
+        scene_prompt: str,
+        characters: list[dict],
+        generation_type: str,
+    ) -> dict:
+        saved_reference = self._saved_today_schedule_reference()
+        if saved_reference.get("path"):
+            return saved_reference
+
+        daily_entry = self._today_schedule_entry()
+        if not daily_entry:
+            return {}
+        selected_reference = await self._select_reference_for_generation({
+            "source": "group_chat",
+            "reference_mode": TODAY_SCHEDULE_REFERENCE_MODE,
+            "generation_type": generation_type,
+            "scene_request": scene_prompt,
+            "character_names": [
+                str(character.get("name") or character.get("id") or "")
+                for character in characters
+                if isinstance(character, dict)
+            ],
+            "outfit_style": daily_entry.get("outfit_style", ""),
+            "outfit": daily_entry.get("outfit", ""),
+            "reference_query": daily_entry.get("reference_query", ""),
+            "prompt": daily_entry.get("prompt", ""),
+            "schedule": daily_entry.get("schedule", ""),
+            "schedule_prompt": daily_entry.get("schedule_prompt", ""),
+            "schedule_details": daily_entry.get("schedule_details", []),
+        }, include_wardrobe=False)
+        return selected_reference if selected_reference.get("path") else {}
+
+    def _save_generation_reference_metadata(
+        self,
+        filename: str,
+        ref_image: str,
+        selected_reference: dict,
+        reference_mode: str = "",
+    ):
+        if not filename:
+            return
+        ref_image = str(ref_image or "").strip()
+        selected_payload = self._selected_reference_metadata(selected_reference)
+        if not ref_image and not selected_payload and not reference_mode:
+            return
+        ref_display = self._reference_path_for_display(ref_image, selected_reference) if ref_image else ""
+        metadata_patch = {}
+        if selected_payload:
+            metadata_patch["selected_reference"] = selected_payload
+        if reference_mode:
+            metadata_patch["reference_mode"] = reference_mode
+        if ref_image:
+            metadata_patch.update({
+                "requested_generation_mode": "img2img",
+                "generation_mode": "img2img",
+                "ref_image": os.path.basename(ref_image),
+                "ref_image_path": ref_display,
+                "requested_ref_image": os.path.basename(ref_image),
+                "requested_ref_image_path": ref_display,
+                "custom_ref_mode": "reference",
+            })
+
+        try:
+            store = ScheduleStore(self.data_dir)
+
+            def _update(all_data):
+                targets = []
+                if isinstance(all_data.get(filename), dict):
+                    targets.append(all_data[filename])
+                for entry in all_data.values():
+                    if isinstance(entry, dict) and entry.get("image_filename") == filename and entry not in targets:
+                        targets.append(entry)
+                for entry in targets:
+                    entry.update(metadata_patch)
+                return all_data
+
+            store.update(_update)
+        except Exception as e:
+            logger.error("保存生图参考图信息失败: %s", e)
+
+        metadata_loader = getattr(getattr(self, "web_server", None), "_load_image_metadata", None)
+        metadata_updater = getattr(getattr(self, "web_server", None), "_update_image_metadata_entry", None)
+        if callable(metadata_loader) and callable(metadata_updater):
+            try:
+                metadata = metadata_loader()
+                meta_entry = dict(metadata.get(filename) or {})
+                meta_entry.update(metadata_patch)
+                metadata_updater(filename, meta_entry)
+            except Exception as e:
+                logger.warning("更新生图参考图元数据失败: %s", e)
 
     def _failed_photo_jobs_path(self) -> str:
         return os.path.join(self.data_dir, "photo_job_failures.json")
@@ -657,6 +846,455 @@ class PortraitGalleryApp:
         logger.info(f"自定义生图成功: {filename}")
         return entry
 
+    def _character_reference_image(self, character: dict) -> str:
+        ref_image = str(character.get("reference_image") or "").strip()
+        if not ref_image:
+            return ""
+        resolver = getattr(getattr(self, "web_server", None), "_resolve_reference_image", None)
+        if callable(resolver):
+            resolved = resolver(ref_image, allow_any_path=True)
+            if resolved:
+                return resolved
+        expanded = os.path.expanduser(ref_image)
+        candidates = [expanded]
+        if not os.path.isabs(expanded):
+            root = resolve_project_root(self.config_path, self.config)
+            candidates.extend([
+                str(root / expanded),
+                os.path.join(self.data_dir, expanded),
+                os.path.join(self.data_dir, "references", expanded),
+            ])
+        for candidate in candidates:
+            path = os.path.abspath(candidate)
+            if os.path.isfile(path):
+                return path
+        return ""
+
+    def _character_generation_prefix(self) -> str:
+        image_config = self.config.get("image_gen", {}) if isinstance(self.config.get("image_gen"), dict) else {}
+        return str(image_config.get("quality_prefix") or DEFAULT_QUALITY_PREFIX).strip()
+
+    @staticmethod
+    def _today_schedule_reference_style_guard(has_reference: bool, style_hint: str = "") -> str:
+        reference_line = (
+            "Default visual style: use the attached img2img reference as the style, lighting, color, texture, and camera reference."
+            if has_reference
+            else "Default visual style: realistic candid smartphone photo with natural light, real texture, and camera-captured imperfections."
+        )
+        parts = [
+            reference_line,
+            "Render every participant as a real photographed person.",
+            "Do not generate anime, manga, cartoon, illustration, 2D art, 3D render, game CG, doll-like plastic skin, digital painting, or stylized poster art.",
+            "Treat words like anime, 二次元, VTuber, virtual, doll-like, or character only as identity/personality/aesthetic hints, never as the visual medium.",
+            "Keep real skin texture, natural light, photographic lens behavior, and slightly imperfect casual framing.",
+        ]
+        if style_hint:
+            parts.append("Apply any requested style only to clothing, mood, palette, or scene details; keep the visual medium photographic.")
+        return " ".join(parts)
+
+    @staticmethod
+    def _short_display_prompt(prompt: str, limit: int = 80) -> str:
+        text = re.sub(r"\s+", " ", str(prompt or "")).strip(" ，,。.!！?")
+        if len(text) > limit:
+            text = text[:limit].rstrip(" ，,。.!！?") + "..."
+        return text
+
+    def _entry_time_now(self) -> str:
+        return datetime.now().strftime("%H:%M")
+
+    async def generate_character(
+        self,
+        character_id: str,
+        user_prompt: str,
+        size: str = "",
+        shot_type: str = "",
+        image_model: str = "",
+        style_hint: str = "",
+        reference_mode: str = "",
+    ) -> DailyEntry:
+        """Generate one image for a selected configured character."""
+        registry = load_character_registry(
+            self.config,
+            load_runtime_persona(self.config, self.data_dir),
+            self.data_dir,
+        )
+        character = registry.get_character(character_id, fallback=False)
+        if not character or not character.get("enabled", True):
+            return DailyEntry(date=datetime.now().strftime("%Y-%m-%d"), outfit="角色不存在或已停用", status="failed")
+
+        shot_type = normalize_custom_shot_type(shot_type) if str(shot_type or "").strip() else ""
+        shot_label = custom_shot_label(shot_type) if shot_type else ""
+        shot_prompt = custom_shot_prompt(shot_type, size) if shot_type else ""
+        scene_prompt = str(user_prompt or "").strip()
+        display_scene_prompt = scene_prompt
+        style_hint = re.sub(r"\s+", " ", str(style_hint or "")).strip()
+        scene_request = scene_prompt
+        if style_hint:
+            scene_request = f"{scene_request}. Requested visual style: {style_hint}"
+        reference_mode = str(reference_mode or "").strip().lower()
+        selected_reference = {}
+        if reference_mode == TODAY_SCHEDULE_REFERENCE_MODE:
+            selected_reference = await self._today_schedule_reference_for_generation(
+                scene_prompt,
+                [character],
+                "character",
+            )
+            if selected_reference.get("path"):
+                scene_request = (
+                    f"{scene_request}. Use the attached reference image from today's schedule "
+                    "for the current outfit, scene mood, and visual continuity; do not use the character avatar as the reference image."
+                )
+        reference_style_guard = (
+            self._today_schedule_reference_style_guard(
+                has_reference=bool(selected_reference.get("path")),
+                style_hint=style_hint,
+            )
+            if reference_mode == TODAY_SCHEDULE_REFERENCE_MODE
+            else ""
+        )
+        final_prompt = " ".join(
+            part
+            for part in (
+                self._character_generation_prefix(),
+                build_character_prompt(character),
+                f"Scene request: {scene_request}.",
+                shot_prompt,
+                reference_style_guard,
+            )
+            if part
+        ).strip()
+        if reference_mode == TODAY_SCHEDULE_REFERENCE_MODE:
+            ref_image = str(selected_reference.get("path") or "").strip()
+        else:
+            ref_image = self._character_reference_image(character)
+        style = style_hint or str(character.get("reference_style") or "").strip() or None
+        if style not in {"cool", "girly", "sweet"}:
+            style = None
+
+        filename = await self.image_gen.generate(
+            final_prompt,
+            style=style,
+            timeout=image_process_timeout(self.config, with_reference_fallback=bool(style or ref_image)),
+            source="custom",
+            theme="custom",
+            prompt_final=True,
+            no_auto_style=not bool(style or ref_image),
+            ref_image=ref_image,
+            size=size,
+            image_model=image_model,
+        )
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if not filename:
+            logger.error("角色生图失败: character=%s", character.get("id"))
+            return DailyEntry(date=today_str, outfit="生成失败", status="failed")
+
+        display_prompt = self._short_display_prompt(display_scene_prompt)
+        caption = f"{character.get('name') or '角色'}把这一刻留进了画廊。"
+        outfit_parts = [f"角色：{character.get('name') or character.get('id')}"]
+        if shot_label:
+            outfit_parts.append(f"视角：{shot_label}")
+        if style_hint:
+            outfit_parts.append(f"风格：{style_hint}")
+        outfit_parts.append(f"场景：{display_prompt}")
+        entry = DailyEntry(
+            date=today_str,
+            time=self._entry_time_now(),
+            outfit_style="角色",
+            outfit=" ".join(outfit_parts),
+            prompt=final_prompt,
+            caption=caption,
+            image_filename=filename,
+            image_path=f"/images/{filename}",
+            status="ok",
+            source="character",
+            base_style=style or "",
+            shot_type=shot_type,
+            prompt_mode="character",
+            pure_prompt=True,
+            custom_prompt=scene_prompt,
+            custom_ref_mode="reference" if ref_image else "text2img",
+            generation_type="character",
+            character_id=character.get("id", ""),
+            character_ids=[character.get("id", "")],
+            character_names=[character.get("name", "")],
+        )
+        save_schedule_entry(self.data_dir, entry)
+        self._update_image_metadata_caption(filename, caption, display_prompt)
+        if reference_mode == TODAY_SCHEDULE_REFERENCE_MODE:
+            self._save_generation_reference_metadata(
+                filename,
+                ref_image,
+                selected_reference,
+                reference_mode=TODAY_SCHEDULE_REFERENCE_MODE,
+            )
+        logger.info("角色生图成功: character=%s image=%s", character.get("id"), filename)
+        return entry
+
+    async def generate_character_reference(
+        self,
+        character_id: str,
+        user_prompt: str = "",
+        size: str = "",
+        shot_type: str = "",
+        image_model: str = "",
+        style_hint: str = "",
+        reference_mode: str = "",
+    ) -> DailyEntry:
+        """Generate a character reference sheet for a selected configured character."""
+        registry = load_character_registry(
+            self.config,
+            load_runtime_persona(self.config, self.data_dir),
+            self.data_dir,
+        )
+        character = registry.get_character(character_id, fallback=False)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if not character or not character.get("enabled", True):
+            return DailyEntry(date=today_str, outfit="角色不存在或已停用", status="failed")
+
+        shot_type = normalize_custom_shot_type(shot_type) if str(shot_type or "").strip() else ""
+        shot_label = custom_shot_label(shot_type) if shot_type else ""
+        shot_prompt = custom_shot_prompt(shot_type, size) if shot_type else ""
+        style_hint = re.sub(r"\s+", " ", str(style_hint or "")).strip()
+        extra_request = str(user_prompt or "").strip()
+        reference_request = (
+            "Character design reference sheet for image generation, clean neutral background, "
+            "clear readable silhouette, consistent face and body identity, detailed hairstyle, "
+            "facial features, outfit materials, color palette, accessories, and key personality cues. "
+            "Do not include multiple different people; keep the same character identity throughout."
+        )
+        if extra_request:
+            reference_request = f"{reference_request} Extra request: {extra_request}."
+        if style_hint:
+            reference_request = f"{reference_request} Requested visual style: {style_hint}."
+
+        final_prompt = " ".join(
+            part
+            for part in (
+                self._character_generation_prefix(),
+                build_character_prompt(character),
+                reference_request,
+                shot_prompt,
+            )
+            if part
+        ).strip()
+
+        ref_image = self._character_reference_image(character)
+        style = style_hint or str(character.get("reference_style") or "").strip() or None
+        if style not in {"cool", "girly", "sweet"}:
+            style = None
+
+        filename = await self.image_gen.generate(
+            final_prompt,
+            style=style,
+            timeout=image_process_timeout(self.config, with_reference_fallback=bool(style or ref_image)),
+            source="custom",
+            theme="custom",
+            prompt_final=True,
+            no_auto_style=not bool(style or ref_image),
+            ref_image=ref_image,
+            size=size,
+            image_model=image_model,
+        )
+        if not filename:
+            logger.error("角色设定图生成失败: character=%s", character.get("id"))
+            return DailyEntry(date=today_str, outfit="生成失败", status="failed")
+
+        name = str(character.get("name") or character.get("id") or "角色")
+        display_prompt = self._short_display_prompt(extra_request or "角色设定图")
+        caption = f"{name}的角色设定图已保存。"
+        outfit_parts = [f"角色：{name}"]
+        if shot_label:
+            outfit_parts.append(f"视角：{shot_label}")
+        if style_hint:
+            outfit_parts.append(f"风格：{style_hint}")
+        outfit_parts.append(f"设定：{display_prompt}")
+        entry = DailyEntry(
+            date=today_str,
+            time=self._entry_time_now(),
+            outfit_style="设定图",
+            outfit=" ".join(outfit_parts),
+            prompt=final_prompt,
+            caption=caption,
+            image_filename=filename,
+            image_path=f"/images/{filename}",
+            status="ok",
+            source="character_reference",
+            base_style=style or "",
+            shot_type=shot_type,
+            prompt_mode="character_reference",
+            pure_prompt=True,
+            custom_prompt=extra_request,
+            custom_ref_mode="reference" if ref_image else "text2img",
+            generation_type="character_reference",
+            character_id=character.get("id", ""),
+            character_ids=[character.get("id", "")],
+            character_names=[name],
+        )
+        save_schedule_entry(self.data_dir, entry)
+        self._update_image_metadata_caption(filename, caption, display_prompt)
+
+        metadata_loader = getattr(getattr(self, "web_server", None), "_load_image_metadata", None)
+        metadata_updater = getattr(getattr(self, "web_server", None), "_update_image_metadata_entry", None)
+        if callable(metadata_loader) and callable(metadata_updater):
+            try:
+                metadata = metadata_loader()
+                meta_entry = dict(metadata.get(filename) or {})
+                meta_entry.update({
+                    "purpose": "character_reference",
+                    "generation_type": "character_reference",
+                    "character_id": character.get("id", ""),
+                    "character_name": name,
+                    "caption": caption,
+                    "display_outfit": display_prompt,
+                })
+                metadata_updater(filename, meta_entry)
+            except Exception as e:
+                logger.warning("角色设定图元数据更新失败: %s", e)
+
+        if character.get("source") == LOCAL_CHARACTER_SOURCE:
+            try:
+                reserved_ids = {
+                    str(item.get("id") or "")
+                    for item in registry.characters
+                    if item.get("source") != LOCAL_CHARACTER_SOURCE and item.get("id")
+                }
+                updated_character = dict(character)
+                updated_character["reference_image"] = f"/images/{filename}"
+                upsert_manual_character(self.data_dir, updated_character, reserved_ids=reserved_ids)
+            except Exception as e:
+                logger.warning("角色设定图回写失败: %s", e)
+
+        logger.info("角色设定图生成成功: character=%s image=%s", character.get("id"), filename)
+        return entry
+
+    async def generate_group(
+        self,
+        character_ids: list[str],
+        user_prompt: str,
+        size: str = "",
+        shot_type: str = "",
+        image_model: str = "",
+        style_hint: str = "",
+        reference_mode: str = "",
+    ) -> DailyEntry:
+        """Generate one group photo for multiple configured characters."""
+        registry = load_character_registry(
+            self.config,
+            load_runtime_persona(self.config, self.data_dir),
+            self.data_dir,
+        )
+        characters = []
+        seen_ids = set()
+        for character_id in character_ids or []:
+            character = registry.get_character(character_id, fallback=False)
+            if not character or not character.get("enabled", True):
+                continue
+            cid = character.get("id", "")
+            if cid and cid not in seen_ids:
+                characters.append(character)
+                seen_ids.add(cid)
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        if len(characters) < 2:
+            return DailyEntry(date=today_str, outfit="合照至少需要两个可用角色", status="failed")
+
+        shot_type = normalize_custom_shot_type(shot_type) if str(shot_type or "").strip() else ""
+        shot_label = custom_shot_label(shot_type) if shot_type else ""
+        shot_prompt = custom_shot_prompt(shot_type, size) if shot_type else ""
+        scene_prompt = str(user_prompt or "").strip()
+        display_scene_prompt = scene_prompt
+        style_hint = re.sub(r"\s+", " ", str(style_hint or "")).strip()
+        if style_hint:
+            scene_prompt = f"{scene_prompt}. Requested visual style: {style_hint}"
+        reference_mode = str(reference_mode or "").strip().lower()
+        selected_reference = {}
+        if reference_mode == TODAY_SCHEDULE_REFERENCE_MODE:
+            selected_reference = await self._today_schedule_reference_for_generation(
+                scene_prompt,
+                characters,
+                "group_photo",
+            )
+            if selected_reference.get("path"):
+                scene_prompt = (
+                    f"{scene_prompt}. Use the attached reference image from today's schedule "
+                    "for the current outfit, scene mood, and visual continuity; do not use character avatar images as references."
+                )
+        group_scene = " ".join(part for part in (scene_prompt, shot_prompt) if part)
+        reference_style_guard = (
+            self._today_schedule_reference_style_guard(
+                has_reference=bool(selected_reference.get("path")),
+                style_hint=style_hint,
+            )
+            if reference_mode == TODAY_SCHEDULE_REFERENCE_MODE
+            else ""
+        )
+        final_prompt = " ".join(
+            part
+            for part in (
+                self._character_generation_prefix(),
+                build_group_prompt(characters, group_scene),
+                reference_style_guard,
+            )
+            if part
+        ).strip()
+        ref_image = str(selected_reference.get("path") or "").strip() if reference_mode == TODAY_SCHEDULE_REFERENCE_MODE else ""
+
+        filename = await self.image_gen.generate(
+            final_prompt,
+            timeout=image_process_timeout(self.config, with_reference_fallback=bool(ref_image)),
+            ref_image=ref_image,
+            source="custom",
+            theme="custom",
+            prompt_final=True,
+            no_auto_style=not bool(ref_image),
+            size=size,
+            image_model=image_model,
+        )
+        if not filename:
+            logger.error("合照生图失败: characters=%s", ",".join(seen_ids))
+            return DailyEntry(date=today_str, outfit="生成失败", status="failed")
+
+        names = [str(character.get("name") or character.get("id")) for character in characters]
+        ids = [str(character.get("id") or "") for character in characters]
+        display_prompt = self._short_display_prompt(display_scene_prompt)
+        caption = f"{'、'.join(names)}一起出现在这一张合照里。"
+        outfit_parts = [f"角色：{'、'.join(names)}"]
+        if shot_label:
+            outfit_parts.append(f"视角：{shot_label}")
+        if style_hint:
+            outfit_parts.append(f"风格：{style_hint}")
+        outfit_parts.append(f"场景：{display_prompt}")
+        entry = DailyEntry(
+            date=today_str,
+            time=self._entry_time_now(),
+            outfit_style="合照",
+            outfit=" ".join(outfit_parts),
+            prompt=final_prompt,
+            caption=caption,
+            image_filename=filename,
+            image_path=f"/images/{filename}",
+            status="ok",
+            source="group_photo",
+            shot_type=shot_type,
+            prompt_mode="group_photo",
+            pure_prompt=True,
+            custom_prompt=display_scene_prompt,
+            custom_ref_mode="reference" if ref_image else "text2img",
+            generation_type="group_photo",
+            character_ids=ids,
+            character_names=names,
+        )
+        save_schedule_entry(self.data_dir, entry)
+        self._update_image_metadata_caption(filename, caption, display_prompt)
+        if reference_mode == TODAY_SCHEDULE_REFERENCE_MODE:
+            self._save_generation_reference_metadata(
+                filename,
+                ref_image,
+                selected_reference,
+                reference_mode=TODAY_SCHEDULE_REFERENCE_MODE,
+            )
+        logger.info("合照生图成功: characters=%s image=%s", ",".join(ids), filename)
+        return entry
+
     @staticmethod
     def _find_entry_by_image(all_data: dict, image_filename: str) -> tuple[str, dict]:
         if image_filename in all_data and isinstance(all_data[image_filename], dict):
@@ -743,7 +1381,7 @@ class PortraitGalleryApp:
         entry = metadata.get(filename)
         if not isinstance(entry, dict):
             return
-        entry["caption"] = str(caption or "").strip()
+        entry["caption"] = repair_mojibake_text(caption).strip()
         display_outfit = str(display_outfit or "").strip()
         if display_outfit:
             entry["display_outfit"] = display_outfit
@@ -774,8 +1412,23 @@ class PortraitGalleryApp:
         elif deleted:
             logger.info("已删除被替换图片文件: %s", filename)
 
+    @staticmethod
+    def _selected_reference_for_reroll(original: dict, meta: dict) -> dict:
+        merged = {}
+        for source in (original, meta):
+            if not isinstance(source, dict):
+                continue
+            selected = source.get("selected_reference")
+            if not isinstance(selected, dict):
+                continue
+            for key, value in selected.items():
+                if value not in ("", None) and not merged.get(key):
+                    merged[key] = value
+        return merged
+
     def _resolve_reroll_reference_image(self, original: dict, meta: dict) -> str:
-        """Find the original img2img reference path for a custom reroll."""
+        """Find the original img2img reference path for a reroll."""
+        selected = self._selected_reference_for_reroll(original, meta)
         candidates = [
             original.get("requested_ref_image_path"),
             meta.get("requested_ref_image_path"),
@@ -785,10 +1438,15 @@ class PortraitGalleryApp:
             meta.get("requested_ref_image"),
             original.get("ref_image"),
             meta.get("ref_image"),
+            selected.get("path"),
+            selected.get("url"),
+            selected.get("filename"),
         ]
         resolver = getattr(self.web_server, "_resolve_reference_image", None)
         search_dirs = [
             getattr(self.web_server, "uploaded_reference_dir", ""),
+            getattr(self.web_server, "wardrobe_reference_dir", ""),
+            getattr(self.web_server, "legacy_uploaded_reference_dir", ""),
             getattr(self.web_server, "reference_dir", ""),
             getattr(self.web_server, "app_reference_dir", ""),
         ]
@@ -808,6 +1466,14 @@ class PortraitGalleryApp:
                         return candidate
         return ""
 
+    @staticmethod
+    def _reference_path_for_display(ref_image: str, selected_reference: dict) -> str:
+        if isinstance(selected_reference, dict):
+            url = str(selected_reference.get("url") or "").strip()
+            if url:
+                return url
+        return os.path.basename(ref_image) if ref_image else ""
+
     async def reroll_image(self, image_filename: str) -> dict:
         """Generate a new card from an existing card's final prompt."""
         store = ScheduleStore(self.data_dir)
@@ -821,7 +1487,7 @@ class PortraitGalleryApp:
         prompt = (meta.get("prompt") or original.get("prompt") or "").strip()
         schedule_time = (original.get("schedule_time") or meta.get("schedule_time") or "").strip()
         original_source = (original.get("source") or meta.get("source") or "").strip()
-        is_scheduled_reroll = original_source == "cron" and bool(schedule_time)
+        is_scheduled_reroll = original_source in TODAY_PHOTO_SOURCES and bool(schedule_time)
         if not prompt and not is_scheduled_reroll:
             return {"status": "failed", "error": "prompt_missing"}
 
@@ -844,6 +1510,8 @@ class PortraitGalleryApp:
         engine = self._engine_from_model_name(raw_model_name)
         engine = engine or self.image_gen.default_engine or "gptimage"
         base_style = (original.get("base_style") or "").strip().lower()
+        original_selected_reference = self._selected_reference_for_reroll(original, meta)
+        original_ref_image = self._resolve_reroll_reference_image(original, meta) if engine == "gptimage" else ""
         is_custom_source = original_source in {"custom", "hermes_api"}
         custom_ref_mode = str(original.get("custom_ref_mode") or "").strip().lower()
         has_custom_reference = custom_ref_mode == "reference" or bool(
@@ -851,10 +1519,11 @@ class PortraitGalleryApp:
             or original.get("requested_ref_image_path")
             or meta.get("requested_ref_image")
             or meta.get("requested_ref_image_path")
+            or original_selected_reference
         )
         custom_ref_image = ""
         if is_custom_source and has_custom_reference and engine == "gptimage":
-            custom_ref_image = self._resolve_reroll_reference_image(original, meta)
+            custom_ref_image = original_ref_image
             if not custom_ref_image:
                 logger.warning("自定义参考图重抽未找到原参考图，将退回文生图: %s", image_filename)
         style = None
@@ -877,21 +1546,29 @@ class PortraitGalleryApp:
             if match:
                 reroll_theme = self._theme_for_hour(int(match.group(1)))
             if reroll_uses_today_schedule:
-                reroll_source = "cron"
+                reroll_source = original_source or "cron"
                 reroll_prompt = ""
                 reroll_prompt_final = False
                 reroll_no_auto_style = False
                 reroll_caption = True
             else:
-                reroll_source = "custom"
+                reroll_source = original_source or "cron"
                 reroll_prompt = prompt
                 reroll_prompt_final = True
-                reroll_no_auto_style = True
+                reroll_no_auto_style = not bool(original_ref_image)
                 reroll_caption = False
 
         ref_image = custom_ref_image if is_custom_source and custom_ref_image else ""
-        selected_reference = {}
-        if engine == "gptimage" and is_scheduled_reroll and reroll_uses_today_schedule:
+        selected_reference = dict(original_selected_reference) if original_ref_image else {}
+        if engine == "gptimage" and is_scheduled_reroll and original_ref_image:
+            ref_image = original_ref_image
+            reroll_no_auto_style = False
+            logger.info(
+                "重抽沿用原参考图: %s ref=%s",
+                image_filename,
+                selected_reference.get("label") or selected_reference.get("filename") or os.path.basename(ref_image),
+            )
+        elif engine == "gptimage" and is_scheduled_reroll and reroll_uses_today_schedule:
             schedule_context_entry = self._today_schedule_entry()
             selected_reference = await self._select_reference_for_generation({
                 "source": "cron_reroll",
@@ -920,7 +1597,7 @@ class PortraitGalleryApp:
             prompt_final=reroll_prompt_final,
             no_auto_style=reroll_no_auto_style,
             theme=reroll_theme,
-            schedule_time=schedule_time if reroll_uses_today_schedule else "",
+            schedule_time=schedule_time if is_scheduled_reroll else "",
             caption=reroll_caption,
             image_model=raw_model_name if engine == "gptimage" else "",
         )
@@ -975,6 +1652,13 @@ class PortraitGalleryApp:
                         key: selected_reference.get(key, "")
                         for key in ("id", "filename", "url", "label", "prompt", "source", "selection_mode", "selection_reason")
                     }
+                if ref_image:
+                    generated.setdefault("requested_generation_mode", "img2img")
+                    generated.setdefault("requested_ref_image", os.path.basename(ref_image))
+                    generated.setdefault(
+                        "requested_ref_image_path",
+                        self._reference_path_for_display(ref_image, selected_reference),
+                    )
             else:
                 for field in ("outfit_style", "outfit", "schedule_time", "shot_type", "prompt_mode", "pure_prompt", "custom_prompt", "custom_ref_mode"):
                     value = original.get(field)
@@ -984,6 +1668,18 @@ class PortraitGalleryApp:
                     value = original.get(field)
                     if value and not generated.get(field):
                         generated[field] = value
+                if selected_reference and not generated.get("selected_reference"):
+                    generated["selected_reference"] = {
+                        key: selected_reference.get(key, "")
+                        for key in ("id", "filename", "url", "label", "prompt", "source", "selection_mode", "selection_reason")
+                    }
+                if ref_image:
+                    generated.setdefault("requested_generation_mode", "img2img")
+                    generated.setdefault("requested_ref_image", os.path.basename(ref_image))
+                    generated.setdefault(
+                        "requested_ref_image_path",
+                        self._reference_path_for_display(ref_image, selected_reference),
+                    )
             if (
                 (not is_scheduled_reroll or not reroll_uses_today_schedule)
                 and not generated.get("caption")
@@ -1567,6 +2263,107 @@ class PortraitGalleryApp:
 
     def _today_schedule_text(self) -> str:
         return self._today_schedule_entry().get("schedule", "")
+
+    def update_photo_plan(self, time_text: str, activity: str) -> dict:
+        """Update one activity line in today's saved schedule and pending photo job."""
+        normalized_time = normalize_schedule_clock(time_text)
+        activity = repair_mojibake_text(re.sub(r"\s+", " ", str(activity or "").strip())).strip()
+        if not normalized_time:
+            return {"status": "error", "message": "invalid_time"}
+        if not activity:
+            return {"status": "error", "time": normalized_time, "message": "empty_activity"}
+
+        today_str = datetime.now().strftime("%Y-%m-%d")
+        result = {"status": "not_found", "time": normalized_time}
+
+        def _update(all_data):
+            if not isinstance(all_data, dict):
+                all_data = {}
+
+            schedule_key = ""
+            if self._is_usable_schedule_entry(all_data.get(today_str)):
+                schedule_key = today_str
+            if not schedule_key:
+                for key, entry in all_data.items():
+                    if (
+                        isinstance(entry, dict)
+                        and not entry.get("image_filename")
+                        and entry.get("date") == today_str
+                        and self._is_usable_schedule_entry(entry)
+                    ):
+                        schedule_key = key
+                        break
+
+            if not schedule_key:
+                result.update({"status": "not_found", "message": "today_schedule_not_found"})
+                return all_data
+
+            entry = dict(all_data.get(schedule_key) or {})
+            schedule_text, found = replace_schedule_activity(
+                entry.get("schedule", ""),
+                normalized_time,
+                activity,
+            )
+            if not found:
+                result.update({"status": "not_found", "message": "schedule_time_not_found"})
+                return all_data
+
+            entry["schedule"] = schedule_text
+            if entry.get("schedule_prompt"):
+                prompt_text, _ = replace_schedule_activity(
+                    entry.get("schedule_prompt", ""),
+                    normalized_time,
+                    activity,
+                )
+                entry["schedule_prompt"] = prompt_text
+            if isinstance(entry.get("schedule_details"), list):
+                details, _ = update_schedule_details_activity(
+                    entry.get("schedule_details"),
+                    normalized_time,
+                    activity,
+                )
+                entry["schedule_details"] = details
+            entry["schedule_edited_at"] = datetime.now().isoformat()
+            entry["schedule_edit_source"] = "web"
+            all_data[schedule_key] = entry
+            result.update({
+                "status": "ok",
+                "time": normalized_time,
+                "activity": activity,
+                "schedule_key": schedule_key,
+            })
+            return all_data
+
+        ScheduleStore(self.data_dir).update(_update)
+        if result.get("status") != "ok":
+            return result
+
+        slot_key = f"{today_str} {normalized_time}"
+        failed = self._failed_photo_jobs.get(slot_key)
+        if isinstance(failed, dict):
+            failed["activity"] = activity
+            self._save_failed_photo_jobs()
+            result["failed_job_updated"] = True
+
+        job_id = self._photo_job_id_for_time(normalized_time)
+        job_updated = False
+        if job_id:
+            job = self.aps.get_job(job_id)
+            if job:
+                run_time = self._local_job_run_time(job)
+                if not run_time or run_time.date() == datetime.now().date():
+                    theme = job.args[0] if getattr(job, "args", None) else self._theme_for_hour(int(normalized_time.split(":", 1)[0]))
+                    schedule_text_for_job = f"{normalized_time} {activity}".strip()
+                    job.modify(args=[theme, schedule_text_for_job])
+                    self._photo_job_schedule_meta[job_id] = {
+                        "theme": theme,
+                        "time": normalized_time,
+                        "activity": activity,
+                    }
+                    job_updated = True
+        result["job_updated"] = job_updated
+        logger.info("今日生图计划已编辑: time=%s activity=%s job_updated=%s", normalized_time, activity[:40], job_updated)
+        return result
 
     def rebuild_photo_jobs(self) -> list:
         """Rebuild dynamic photo jobs from today's saved schedule."""
@@ -2222,8 +3019,8 @@ class PortraitGalleryApp:
                     if isinstance(value, dict) and value.get("image_filename") == filename:
                         entry = value
                         break
-            caption = str((entry or {}).get("caption") or "").strip()
-            fallback = str(fallback or "").strip()
+            caption = repair_mojibake_text((entry or {}).get("caption") or "").strip()
+            fallback = repair_mojibake_text(fallback).strip()
             if self._caption_text_usable(caption) or not self._caption_text_usable(fallback):
                 return caption or fallback or ""
 
@@ -2249,13 +3046,14 @@ class PortraitGalleryApp:
 
     @staticmethod
     def _caption_text_usable(text: str) -> bool:
+        text = repair_mojibake_text(text)
         text = re.sub(r"\s+", "", str(text or "")).strip("，,。.!！?；;、")
         return len(text) >= 4
 
     @classmethod
     def _prefer_caption_text(cls, candidate: str = "", current: str = "") -> str:
-        candidate = str(candidate or "").strip()
-        current = str(current or "").strip()
+        candidate = repair_mojibake_text(candidate).strip()
+        current = repair_mojibake_text(current).strip()
         if cls._caption_text_usable(candidate):
             return candidate
         if cls._caption_text_usable(current):

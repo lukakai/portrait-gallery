@@ -7,8 +7,11 @@ import random
 import re
 from datetime import datetime, date, timedelta
 from typing import Optional
+from zoneinfo import ZoneInfo
 
+from calendar_context import build_day_context
 from data import DailyEntry
+from keyword_cloud import build_schedule_keyword_prompt_block
 from settings import (
     DEFAULT_OUTFIT_STYLES,
     llm_choice_text,
@@ -18,6 +21,7 @@ from settings import (
     llm_temperature_param_error,
     load_enabled_outfit_styles,
     load_runtime_persona,
+    load_schedule_forbidden_keywords,
 )
 
 logger = logging.getLogger(__name__)
@@ -36,6 +40,57 @@ SCHEDULE_TYPES = [
     "工作日", "约会日", "宅家日", "购物日", "运动日",
     "学习日", "社交日", "旅行日", "创作日", "放松日",
 ]
+
+BED_IDLE_TERMS = (
+    "赖床",
+    "床上",
+    "被窝",
+    "躺床",
+    "躺在床",
+    "窝在床",
+    "翻手机",
+    "刷手机",
+    "玩手机",
+)
+
+COOKING_TERMS = (
+    "做饭",
+    "做早餐",
+    "做午餐",
+    "做晚餐",
+    "准备早餐",
+    "准备午餐",
+    "准备晚餐",
+    "下厨",
+    "料理",
+    "煮饭",
+    "煮面",
+    "煮一",
+    "煮碗",
+    "炒菜",
+    "烤饼",
+    "烤蛋糕",
+    "烤吐司",
+    "厨房为自己做",
+    "厨房里做",
+)
+
+LOW_ENERGY_HOME_TERMS = (
+    "窝在沙发",
+    "窝在客厅",
+    "抱着抱枕",
+    "追番",
+    "看动漫",
+    "看电影",
+    "刷剧",
+    "发呆",
+)
+
+SCHEDULE_DIVERSITY_IDEAS = (
+    "晨间：花市买一小束花、楼下取咖啡、整理书桌、去便利店补生活用品、做拉伸、给植物换水、图书馆还书、短途散步。",
+    "中午/下午：去咖啡馆写计划、逛文创店、看展、修照片、整理灵感板、练琴/练舞、去书店、做手作、和朋友吃轻食。",
+    "傍晚/晚上：城市散步、听播客收拾房间、整理明天穿搭、写观影笔记、夜间阅读、做香薰放松、复盘直播/创作素材。",
+)
 
 BASE_STYLE_OPTIONS = {"cool", "girly", "sweet"}
 SCHEDULE_DETAIL_REQUIRED_FIELDS = (
@@ -70,8 +125,213 @@ class DailyScheduler:
         self._llm_config = config.get("llm", {})
         self._char = config.get("character", {})
 
+    def _configured_today(self) -> date:
+        """Return today's date in the configured service timezone."""
+        timezone_name = str(self.config.get("config", {}).get("timezone") or "").strip()
+        if timezone_name:
+            try:
+                return datetime.now(ZoneInfo(timezone_name)).date()
+            except Exception as exc:
+                logger.warning("timezone 配置无效，使用系统日期: %s (%s)", timezone_name, exc)
+        return date.today()
+
+    def _day_context(self, target_date: date):
+        return build_day_context(target_date, self.config)
+
+    def _select_schedule_type(self, day_context) -> str:
+        return random.choice(day_context.schedule_type_pool(SCHEDULE_TYPES))
+
+    @staticmethod
+    def _calendar_conflict_message(day_context, conflicts: list[str]) -> str:
+        if not conflicts:
+            return ""
+        return (
+            f"{day_context.date_label} 是{day_context.day_type_label}，"
+            f"不应出现休息日工作/上学安排: {', '.join(conflicts)}"
+        )
+
+    @staticmethod
+    def _activity_has(activity: str, terms: tuple[str, ...]) -> bool:
+        compact = re.sub(r"\s+", "", str(activity or ""))
+        return any(term in compact for term in terms)
+
+    @staticmethod
+    def _activity_signature(activity: str) -> str:
+        text = re.sub(r"\s+", "", str(activity or ""))
+        text = re.sub(r"[，,。.!！?？；;、：:（）()《》“”\"'‘’]", "", text)
+        for filler in ("今天的", "今日的", "一份", "简单的", "精致的", "舒服的", "轻松的"):
+            text = text.replace(filler, "")
+        return text[:18]
+
+    def _schedule_diversity_prompt_block(self, schedule_history: str) -> str:
+        ideas = "\n".join(f"- {item}" for item in SCHEDULE_DIVERSITY_IDEAS)
+        history_text = schedule_history or "（无近期日程）"
+        return f"""近 3 天日程避重参考（不要复刻这些活动组合或场景顺序）：
+{history_text}
+
+多样化要求：
+- 今天必须像真实新的一天，不要回到“早上赖床/床上刷手机，中午做饭，晚上做饭/准备晚餐”的模板。
+- schedule 第一条不要写赖床、躺床、床上翻手机、被窝里刷手机；可以写起床后的具体行动，如取咖啡、整理书桌、晨间拉伸、出门办小事。
+- 一天最多 1 条下厨/做饭/准备饭菜/厨房烹饪活动；午餐和晚餐不要都写成做饭。另一餐可以写外食、轻食、便当、咖啡馆、餐厅、朋友聚餐或简单用餐。
+- 至少 3 条活动要脱离“床/沙发/厨房”的低变化场景，给出明确地点、道具或兴趣任务。
+- 不要连续多天复用同一套活动骨架；从下面灵感里挑新的生活片段，但不要逐字照抄：
+{ideas}"""
+
+    def _load_schedule_data(self) -> dict:
+        path = os.path.join(self.data_dir, "schedule_data.json")
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _get_schedule_history(self, today: date, days: int = 3) -> str:
+        all_data = self._load_schedule_data()
+        lines = []
+        for i in range(1, days + 1):
+            date_str = (today - timedelta(days=i)).isoformat()
+            entry = all_data.get(date_str)
+            if not isinstance(entry, dict) or entry.get("status") != "ok":
+                continue
+            activities = [activity for _time_text, activity in self._schedule_plan_items(entry.get("schedule", ""))]
+            if not activities:
+                continue
+            summary = " / ".join(activity[:24] for activity in activities[:6])
+            lines.append(f"[{date_str}] {summary}")
+        return "\n".join(lines) if lines else "（无近期日程）"
+
+    def _recent_schedule_category_counts(self, today: date, days: int = 3) -> dict[str, int]:
+        all_data = self._load_schedule_data()
+        counts = {"cooking_days": 0, "bed_idle_start_days": 0, "low_energy_home_days": 0}
+        for i in range(1, days + 1):
+            date_str = (today - timedelta(days=i)).isoformat()
+            entry = all_data.get(date_str)
+            if not isinstance(entry, dict) or entry.get("status") != "ok":
+                continue
+            items = self._schedule_plan_items(entry.get("schedule", ""))
+            activities = [activity for _time_text, activity in items]
+            if any(self._activity_has(activity, COOKING_TERMS) for activity in activities):
+                counts["cooking_days"] += 1
+            if activities and self._activity_has(activities[0], BED_IDLE_TERMS):
+                counts["bed_idle_start_days"] += 1
+            if any(self._activity_has(activity, LOW_ENERGY_HOME_TERMS) for activity in activities):
+                counts["low_energy_home_days"] += 1
+        return counts
+
+    def _schedule_diversity_error(
+        self,
+        display_items: list[tuple[str, str]],
+        recent_counts: Optional[dict[str, int]] = None,
+    ) -> str:
+        if not display_items:
+            return ""
+        recent_counts = recent_counts or {}
+        first_activity = display_items[0][1]
+        if self._activity_has(first_activity, BED_IDLE_TERMS):
+            return "schedule 第一条是赖床/床上刷手机模板，请换成起床后的具体行动"
+
+        cooking_items = [
+            f"{time_text} {activity}"
+            for time_text, activity in display_items
+            if self._activity_has(activity, COOKING_TERMS)
+        ]
+        if len(cooking_items) > 1:
+            return "一天最多 1 条下厨/做饭/准备饭菜活动，当前重复: " + "；".join(cooking_items[:3])
+        if cooking_items and recent_counts.get("cooking_days", 0) >= 2:
+            return "最近 3 天已有多天下厨/做饭，今天请改成外食、轻食、咖啡馆、便当或非餐饮活动"
+
+        low_energy_items = [
+            f"{time_text} {activity}"
+            for time_text, activity in display_items
+            if self._activity_has(activity, LOW_ENERGY_HOME_TERMS)
+        ]
+        if len(low_energy_items) > 2:
+            return "床/沙发/追番/发呆类低变化活动过多，请增加外出、兴趣、整理、创作或社交任务"
+
+        signatures = [self._activity_signature(activity) for _time_text, activity in display_items]
+        duplicates = sorted({item for item in signatures if item and signatures.count(item) > 1})
+        if duplicates:
+            return "schedule 内部活动过于重复: " + "、".join(duplicates[:3])
+        return ""
+
     def _runtime_persona(self) -> dict:
         return load_runtime_persona(self.config, self.data_dir)
+
+    def _schedule_forbidden_keywords(self) -> list[str]:
+        return load_schedule_forbidden_keywords(self.config, self.data_dir)
+
+    def _schedule_forbidden_prompt_block(self) -> str:
+        keywords = self._schedule_forbidden_keywords()
+        if not keywords:
+            return "（无）"
+        text = "、".join(keywords)
+        return (
+            f"禁止关键词：{text}\n"
+            "硬性要求：outfit、schedule、schedule_prompt、schedule_details、prompt、caption、reference_query、"
+            "outfit_keywords、scene_keywords 都不能出现这些关键词，也不要安排相关活动、道具、场景或配饰。"
+            "如果禁词是中文，也要避开对应英文同义词；例如“包”要同时避开 bag、handbag、purse、tote、package、packing 等相关内容。"
+        )
+
+    def _schedule_keyword_cloud_prompt_block(self, limit: int = 18) -> str:
+        return build_schedule_keyword_prompt_block(self.data_dir, limit=limit)
+
+    @staticmethod
+    def _schedule_forbidden_variants(keyword: str) -> set[str]:
+        text = re.sub(r"\s+", " ", str(keyword or "")).strip().casefold()
+        if not text:
+            return set()
+        variants = {text}
+        if text == "包":
+            variants.update({
+                "bag",
+                "bags",
+                "handbag",
+                "hand bag",
+                "purse",
+                "tote",
+                "tote bag",
+                "package",
+                "packages",
+                "packing",
+                "pack",
+                "parcel",
+            })
+        return variants
+
+    def _schedule_forbidden_output_error(self, data: dict) -> str:
+        keywords = self._schedule_forbidden_keywords()
+        if not keywords:
+            return ""
+        fields = [
+            data.get("outfit_style", ""),
+            data.get("reference_query", ""),
+            data.get("outfit", ""),
+            data.get("schedule", ""),
+            data.get("schedule_prompt", ""),
+            data.get("prompt", ""),
+            data.get("caption", ""),
+            data.get("outfit_keywords", ""),
+            data.get("scene_keywords", ""),
+        ]
+        details = data.get("schedule_details")
+        if isinstance(details, list):
+            for item in details:
+                if isinstance(item, dict):
+                    fields.extend(str(value or "") for value in item.values())
+        text = "\n".join(self._text_field(field) for field in fields).casefold()
+        for keyword in keywords:
+            for variant in self._schedule_forbidden_variants(keyword):
+                if not variant:
+                    continue
+                if re.search(r"[a-z0-9]", variant):
+                    pattern = r"(?<![a-z0-9])" + re.escape(variant) + r"(?![a-z0-9])"
+                    if re.search(pattern, text):
+                        return f"输出包含禁词「{keyword}」相关内容: {variant}"
+                    continue
+                if variant in text:
+                    return f"输出包含禁词「{keyword}」相关内容: {variant}"
+        return ""
 
     def _read_config_key(self, key: str) -> str:
         """Read a value from api_keys_config.json (set via Web UI)."""
@@ -202,8 +462,28 @@ class DailyScheduler:
                 except Exception:
                     return None
 
+        retryable_statuses = {429, 500, 502, 503, 504}
+        direct_fallback_statuses = {401, 403}
+        per_model_attempts = 2
+
+        def _model_unavailable(detail: str) -> bool:
+            lower = str(detail or "").lower()
+            return any(
+                marker in lower
+                for marker in (
+                    "model not found",
+                    "model_not_found",
+                    "does not exist",
+                    "not exist",
+                    "no permission",
+                    "permission denied",
+                    "unauthorized",
+                    "forbidden",
+                )
+            )
+
         for model in models:
-            payload = {
+            base_payload = {
                 "model": model,
                 "messages": messages,
                 "max_tokens": 8192 if json_mode and self._should_disable_thinking(model) else 4096,
@@ -211,95 +491,134 @@ class DailyScheduler:
                 "stream": False,
             }
             if json_mode:
-                payload["response_format"] = {"type": "json_object"}
+                base_payload["response_format"] = {"type": "json_object"}
                 if self._should_disable_thinking(model):
-                    payload["thinking"] = {"type": "disabled"}
-            try:
-                resp, request_error = await loop.run_in_executor(
-                    None,
-                    lambda p=payload: _do_request(chat_url, headers, p, timeout),
-                )
-                if resp is None and "thinking" in payload:
-                    retry_payload = dict(payload)
-                    retry_payload.pop("thinking", None)
-                    logger.warning(
-                        "LLM model %s request failed with thinking disabled (%s); retrying without it",
-                        model,
-                        request_error or "无响应",
-                    )
+                    base_payload["thinking"] = {"type": "disabled"}
+
+            payload = dict(base_payload)
+            for attempt in range(1, per_model_attempts + 1):
+                try:
                     resp, request_error = await loop.run_in_executor(
                         None,
-                        lambda p=retry_payload: _do_request(chat_url, headers, p, timeout),
+                        lambda p=dict(payload): _do_request(chat_url, headers, p, timeout),
                     )
-                if resp is not None and resp.status_code == 400:
-                    error_body = _response_json(resp)
-                    retry_payload = dict(payload)
-                    retry_reasons = []
-                    if "temperature" in retry_payload and llm_temperature_param_error(error_body):
-                        retry_payload.pop("temperature", None)
-                        retry_reasons.append("temperature")
-                    if "response_format" in retry_payload and (
-                        self._response_format_param_error(error_body) or json_mode
-                    ):
-                        retry_payload.pop("response_format", None)
-                        retry_reasons.append("response_format")
-                    if "thinking" in retry_payload and self._thinking_param_error(error_body):
+                    if resp is None and "thinking" in payload:
+                        retry_payload = dict(payload)
                         retry_payload.pop("thinking", None)
-                        retry_reasons.append("thinking")
-                    if retry_reasons:
                         logger.warning(
-                            "LLM model %s rejects %s; retrying without unsupported params",
+                            "LLM model %s request failed with thinking disabled (%s); retrying without it",
                             model,
-                            "/".join(retry_reasons),
+                            request_error or "无响应",
                         )
                         resp, request_error = await loop.run_in_executor(
                             None,
                             lambda p=retry_payload: _do_request(chat_url, headers, p, timeout),
                         )
-                if resp is not None and resp.status_code == 200:
-                    data = resp.json()
-                    choices = data.get("choices") if isinstance(data, dict) else None
-                    if not choices:
-                        logger.error(
-                            "LLM call returned invalid response: model=%s, detail=%s",
-                            model,
-                            _response_error(resp),
-                        )
-                        continue
-                    content = self._choice_final_text(choices[0]) if json_mode else llm_choice_text(choices[0])
-                    if content:
-                        return content
-                    if json_mode:
-                        reasoning_excerpt = llm_response_excerpt(
-                            choices[0].get("message", {}).get("reasoning_content", "") if isinstance(choices[0], dict) else "",
-                            limit=220,
-                        )
-                        if reasoning_excerpt:
-                            logger.warning(
-                                "LLM returned reasoning without final JSON content: model=%s, reasoning=%s",
+                        payload = retry_payload
+
+                    if resp is not None and resp.status_code == 400:
+                        error_body = _response_json(resp)
+                        if _model_unavailable(_response_error(resp)):
+                            logger.error(
+                                "LLM model unavailable: model=%s, detail=%s",
                                 model,
-                                reasoning_excerpt,
+                                _response_error(resp),
                             )
-                    logger.error(f"LLM call returned empty content: model={model}")
-                else:
+                            break
+                        retry_payload = dict(payload)
+                        retry_reasons = []
+                        if "temperature" in retry_payload and llm_temperature_param_error(error_body):
+                            retry_payload.pop("temperature", None)
+                            retry_reasons.append("temperature")
+                        if "response_format" in retry_payload and (
+                            self._response_format_param_error(error_body) or json_mode
+                        ):
+                            retry_payload.pop("response_format", None)
+                            retry_reasons.append("response_format")
+                        if "thinking" in retry_payload and self._thinking_param_error(error_body):
+                            retry_payload.pop("thinking", None)
+                            retry_reasons.append("thinking")
+                        if retry_reasons:
+                            logger.warning(
+                                "LLM model %s rejects %s; retrying without unsupported params",
+                                model,
+                                "/".join(retry_reasons),
+                            )
+                            resp, request_error = await loop.run_in_executor(
+                                None,
+                                lambda p=retry_payload: _do_request(chat_url, headers, p, timeout),
+                            )
+                            payload = retry_payload
+
+                    if resp is not None and resp.status_code == 200:
+                        data = resp.json()
+                        choices = data.get("choices") if isinstance(data, dict) else None
+                        if not choices:
+                            logger.error(
+                                "LLM call returned invalid response: model=%s, detail=%s",
+                                model,
+                                _response_error(resp),
+                            )
+                            break
+                        content = self._choice_final_text(choices[0]) if json_mode else llm_choice_text(choices[0])
+                        if content:
+                            return content
+                        if json_mode:
+                            reasoning_excerpt = llm_response_excerpt(
+                                choices[0].get("message", {}).get("reasoning_content", "") if isinstance(choices[0], dict) else "",
+                                limit=220,
+                            )
+                            if reasoning_excerpt:
+                                logger.warning(
+                                    "LLM returned reasoning without final JSON content: model=%s, reasoning=%s",
+                                    model,
+                                    reasoning_excerpt,
+                                )
+                        logger.error("LLM call returned empty content: model=%s", model)
+                        break
+
                     status = resp.status_code if resp is not None else "request_failed"
+                    detail = request_error or _response_error(resp)
                     logger.error(
-                        "LLM call failed: model=%s, status=%s, detail=%s",
+                        "LLM call failed: model=%s, status=%s, attempt=%s/%s, detail=%s",
                         model,
                         status,
-                        request_error or _response_error(resp),
+                        attempt,
+                        per_model_attempts,
+                        detail,
                     )
-            except Exception as e:
-                logger.error(f"LLM call error: model={model}, {e}")
+                    if (
+                        resp is not None
+                        and (status in direct_fallback_statuses or _model_unavailable(detail))
+                    ):
+                        break
+                    if attempt < per_model_attempts and (resp is None or status in retryable_statuses):
+                        await asyncio.sleep(1)
+                        continue
+                    break
+                except Exception as e:
+                    logger.error(
+                        "LLM call error: model=%s, attempt=%s/%s, %s",
+                        model,
+                        attempt,
+                        per_model_attempts,
+                        e,
+                    )
+                    if attempt < per_model_attempts:
+                        await asyncio.sleep(1)
+                        continue
+                    break
         return None
 
-    def _build_schedule_prompt(self, today: date, history: str) -> str:
+    def _build_schedule_prompt(self, today: date, history: str, schedule_history: str) -> str:
         """构建日程生成 prompt"""
         weekday = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][today.weekday()]
+        day_context = self._day_context(today)
         enabled_styles = load_enabled_outfit_styles(self.config, self.data_dir)
         style_list_text = ", ".join(enabled_styles)
         mood = random.choice(MOOD_COLORS)
-        sched_type = random.choice(SCHEDULE_TYPES)
+        sched_type = self._select_schedule_type(day_context)
+        calendar_guidance = day_context.prompt_block(sched_type)
         persona = self._runtime_persona()
         character_name = persona.get("name") or "角色"
         user_name = persona.get("user_name") or "用户"
@@ -331,8 +650,17 @@ class DailyScheduler:
 心情色彩：{mood}
 日程类型：{sched_type}
 
+【真实日历约束】
+{calendar_guidance}
+
 【历史穿搭参考（不要重复以下穿搭）】
 {history}
+
+【日程避重与多样化要求】
+{self._schedule_diversity_prompt_block(schedule_history)}
+
+【历史生图词云参考（软偏好，不是硬约束）】
+{self._schedule_keyword_cloud_prompt_block(limit=18)}
 
 【收藏穿搭偏好（用户主动收藏的审美方向；只作为发型/穿搭参考，不是日程、动作或场景参考）】
 {favorite_outfits}
@@ -340,11 +668,15 @@ class DailyScheduler:
 【不喜欢穿搭反馈（用户明确想减少的审美方向；只作为负向发型/穿搭参考，不是硬编码禁用规则）】
 {disliked_outfits}
 
+【日程禁词（最高优先级，用户不想让 LLM 生成的内容）】
+{self._schedule_forbidden_prompt_block()}
+
 【角色外貌】
 {appearance}
 
 【任务要求】
 请为今日生成一份完整的穿搭和日程计划。
+必须严格服从【真实日历约束】：周末/法定节假日不要安排上班、上学、通勤、办公室会议、考试、作业或加班；调休上班日才允许按工作日处理。
 
 ⚠️ 你需要自己选择当天最合适的 outfit_style，并写出 reference_query：
 - outfit_style 必须从 [{style_list_text}] 中选择一个，不要使用未启用的风格。
@@ -356,7 +688,7 @@ class DailyScheduler:
 ⚠️ outfit 字段必须包含以下五个部分，缺一不可：
 1. 「风格：」+ 风格名（只能从 [{style_list_text}] 中选，不要使用未启用的风格）
 2. 「发型：」+ 具体发型描述（15-30 个汉字，如：双马尾配蝴蝶结、慵懒低丸子头、编发侧马尾、高马尾、公主切、蛋卷头等，不要披头散发）
-3. 「穿搭：」+ 详细穿搭描述（至少 70 个汉字），必须同时写清：上装、下装或裙装、鞋子、包/发饰/首饰等配饰、主色、材质、版型/廓形、一个细节亮点。不要只写“少女风造型”“精心搭配”等空泛词。
+3. 「穿搭：」+ 详细穿搭描述（至少 70 个汉字），必须同时写清：上装、下装或裙装、鞋子、发饰/首饰等配饰、主色、材质、版型/廓形、一个细节亮点。不要只写“少女风造型”“精心搭配”等空泛词。
 4. 「动作：」+ 当前的姿态/场景动作（20-40 个汉字，由你根据今天设定自主决定；示例只作格式参考，不要照抄：托腮趴在桌上、踮脚够书架上的书、蹲下系鞋带、靠在窗边喝咖啡等）
 5. 「场景：」+ 当前中文场景描述（15-40 个汉字，由你根据今天设定自主决定；示例只作格式参考，不要照抄：晨光照进来的卧室窗边、安静咖啡馆的靠窗小桌、暖色路灯下的街角等）
 
@@ -438,13 +770,15 @@ JSON 格式（字段名固定，value 替换为实际内容）：
     "scene_keywords": "coffee shop, cafe counter, warm ambient light"
 }}"""
 
-    def _build_compact_schedule_prompt(self, today: date, history: str) -> str:
+    def _build_compact_schedule_prompt(self, today: date, history: str, schedule_history: str) -> str:
         """Build a shorter schedule prompt for providers that choke on the full context."""
         weekday = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][today.weekday()]
+        day_context = self._day_context(today)
         enabled_styles = load_enabled_outfit_styles(self.config, self.data_dir)
         style_list_text = ", ".join(enabled_styles)
         mood = random.choice(MOOD_COLORS)
-        sched_type = random.choice(SCHEDULE_TYPES)
+        sched_type = self._select_schedule_type(day_context)
+        calendar_guidance = day_context.prompt_block(sched_type)
         persona = self._runtime_persona()
         character_name = persona.get("name") or "角色"
         user_name = persona.get("user_name") or "用户"
@@ -460,13 +794,20 @@ JSON 格式（字段名固定，value 替换为实际内容）：
 可选穿搭风格：{style_list_text}
 心情色彩：{mood}
 日程类型：{sched_type}
+真实日历：
+{calendar_guidance}
 角色外貌：{str(appearance)[:700]}
 小心思口吻：{str(caption_voice)[:220]}
 历史参考（避免重复）：{str(history)[:700]}
+近期日程避重（不要复刻）：{str(schedule_history)[:900]}
+历史生图词云（软参考）：{self._schedule_keyword_cloud_prompt_block(limit=12)[:700]}
 收藏偏好（只参考穿搭/发型气质）：{self._favorite_outfit_context(limit=2)[:700]}
 不喜欢反馈（减少相似穿搭/发型）：{self._disliked_outfit_context(limit=2)[:500]}
+日程禁词（最高优先级，相关活动/道具/场景/配饰都不要生成）：{self._schedule_forbidden_prompt_block()}
 
 硬性要求：
+0. 严格服从真实日历；休息日/节假日禁止写上班、上学、通勤、办公室会议、考试、作业或加班，调休上班日除外。
+0.1. 日程要避开模板化重复：第一条不要赖床/床上刷手机；一天最多 1 条下厨/做饭/准备饭菜；至少 3 条活动离开床/沙发/厨房场景。
 1. outfit_style 必须从可选穿搭风格中选一个。
 2. outfit 必须是中文，包含「风格：」「发型：」「穿搭：」「动作：」「场景：」五段；穿搭写清上装、下装/裙装、鞋子、配饰、颜色、材质/版型。
 3. schedule 必须是 6-8 行中文，每行「HH:mm 中文活动」，用 \\n 分隔，覆盖 06:00-11:59、12:00-17:59、18:00-23:59；分钟不能是 00，不要安排 03:00-05:59，时间要像 08:12、10:27、13:18、15:42、18:36 这样自然浮动。
@@ -502,10 +843,13 @@ JSON 格式（字段名固定，value 替换为实际内容）：
   "scene_keywords": "English scene keywords"
 }}"""
 
-    def _build_emergency_schedule_prompt(self, today: date) -> str:
+    def _build_emergency_schedule_prompt(self, today: date, schedule_history: str = "") -> str:
         """Smallest strict prompt used when an upstream model times out on rich context."""
         weekday = ["星期一", "星期二", "星期三", "星期四", "星期五", "星期六", "星期日"][today.weekday()]
+        day_context = self._day_context(today)
         enabled_styles = load_enabled_outfit_styles(self.config, self.data_dir)
+        sched_type = self._select_schedule_type(day_context)
+        calendar_guidance = day_context.prompt_block(sched_type)
         persona = self._runtime_persona()
         character_name = persona.get("name") or "角色"
         appearance = persona.get("appearance") or self._char.get("appearance", "")
@@ -516,10 +860,17 @@ JSON 格式（字段名固定，value 替换为实际内容）：
 
 生成 {character_name} 的今日 JSON 日程。日期 {today.isoformat()} {weekday}。
 可选风格：{", ".join(enabled_styles)}
+真实日历：
+{calendar_guidance}
 外貌约束：{str(appearance)[:320]}
+禁词约束：{self._schedule_forbidden_prompt_block()}
+近期日程避重：{str(schedule_history)[:500]}
+词云软参考：{self._schedule_keyword_cloud_prompt_block(limit=8)[:360]}
 
 只输出 minified JSON，不要换成数组，不要代码块。
 要求：
+- 严格服从真实日历；休息日/节假日禁止写上班、上学、通勤、办公室会议、考试、作业或加班，调休上班日除外。
+- 避免重复模板：第一条不要赖床/床上刷手机；一天最多 1 条下厨/做饭/准备饭菜；午餐和晚餐不要都写做饭；多安排具体地点、道具或兴趣任务。
 - outfit_style 从可选风格中选。
 - schedule 固定 6 行，时间用 08:12、10:27、13:18、15:42、18:36、22:11，每行中文活动，覆盖早中晚；不要用整点或 03:00-05:59。
 - schedule_prompt 与 schedule 时间一致，纯英文。
@@ -1121,15 +1472,18 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
 
     async def generate_today(self) -> Optional[DailyEntry]:
         """生成今日日程"""
-        today = date.today()
+        today = self._configured_today()
+        day_context = self._day_context(today)
         date_str = today.isoformat()
 
-        logger.info(f"正在生成 {date_str} 的日程...")
+        logger.info("正在生成 %s 的日程... date_context=%s", date_str, day_context.day_type_label)
 
         history = self._get_history(today)
-        prompt = self._build_schedule_prompt(today, history)
-        compact_prompt = self._build_compact_schedule_prompt(today, history)
-        emergency_prompt = self._build_emergency_schedule_prompt(today)
+        schedule_history = self._get_schedule_history(today)
+        recent_counts = self._recent_schedule_category_counts(today)
+        prompt = self._build_schedule_prompt(today, history, schedule_history)
+        compact_prompt = self._build_compact_schedule_prompt(today, history, schedule_history)
+        emergency_prompt = self._build_emergency_schedule_prompt(today, schedule_history)
         prompt_sequence = [prompt, compact_prompt, emergency_prompt]
 
         # 最多重试 3 次
@@ -1174,12 +1528,20 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
             if not schedule_display or not schedule_prompt or not self._contains_cjk(schedule_display):
                 logger.warning(f"日程字段不完整或展示日程非中文 (attempt {attempt+1})")
                 continue
+            forbidden_error = self._schedule_forbidden_output_error(data)
+            if forbidden_error:
+                logger.warning("日程触发禁词约束 (attempt %s): %s", attempt + 1, forbidden_error)
+                continue
             display_items, prompt_items, alignment_error = self._validate_schedule_alignment(
                 schedule_display,
                 schedule_prompt,
             )
             if alignment_error:
                 logger.warning(f"日程/生图日程结构不合格 (attempt {attempt+1}): {alignment_error}")
+                continue
+            diversity_error = self._schedule_diversity_error(display_items, recent_counts)
+            if diversity_error:
+                logger.warning("日程重复性过高 (attempt %s): %s", attempt + 1, diversity_error)
                 continue
             missing_display = self._missing_required_periods(schedule_display)
             missing_prompt = self._missing_required_periods(schedule_prompt)
@@ -1199,6 +1561,16 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
             )
             if detail_error:
                 logger.warning(f"schedule_details 不合格 (attempt {attempt+1}): {detail_error}")
+                continue
+            calendar_conflicts = day_context.rest_day_conflicts(
+                schedule_display,
+                schedule_prompt,
+                schedule_details,
+                data.get("caption", ""),
+            )
+            calendar_error = self._calendar_conflict_message(day_context, calendar_conflicts)
+            if calendar_error:
+                logger.warning("真实日期约束不合格 (attempt %s): %s", attempt + 1, calendar_error)
                 continue
 
             persona = self._runtime_persona()

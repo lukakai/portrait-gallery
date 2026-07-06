@@ -1,6 +1,6 @@
 # 🎀 Portrait Gallery
 
-当前版本：**v1.2.4**
+当前版本：**v1.3.2**
 
 > AI 穿搭生图 & 个人画廊系统 —— 让 AI 每天为你量身定制穿搭方案并自动生成写真
 
@@ -9,7 +9,13 @@
 ## ✨ 功能亮点
 
 - 📅 **LLM 日程驱动** — DeepSeek 自动生成每日穿搭日程（HH:mm 精度），按时触发生图
+- 👥 **多角色与群聊** — 支持本地角色库、单人图、合照、群聊房间、角色自动回复和群聊触发生图
 - 🎨 **多引擎生图** — 支持 OpenAI-compatible API (GPT Image / AxonHub / 自定义端点)、Gemini、Gitee z-image-turbo 可选回退（默认关闭）
+- 🧩 **三级 LLM 模型链** — 设置页维护主模型与多级 fallback，日程、caption、群聊和即时推断都会按链路降级
+- ☁️ **关键词偏好云** — 从自定义生图输入与收藏衣柜中提取偏好词，作为每日穿搭日程的柔性参考
+- 🗓️ **真实日期约束** — 日程生成会识别周末、法定节假日、调休上班日和自定义假期，减少休息日写上班/上课的冲突
+- 🔁 **日程去重约束** — 结合近期日程历史，减少连续出现赖床、刷手机、做饭等重复模板
+- ✏️ **今日计划微调** — 今日生图计划支持双击编辑活动内容，并同步保存到当天日程和待执行任务
 - 🖼️ **Web 画廊** — 今日/全部/收藏/衣柜四 Tab，横版大卡 + 网格双布局
 - 🎀 **穿搭生成** — 自定义 prompt + 参考图 + 尺寸选择
 - ⏰ **动态调度** — LLM 日程驱动，根据 HH:mm 时间动态创建一次性生图任务
@@ -20,7 +26,7 @@
 ### 1. 克隆
 
 ```bash
-git clone https://github.com/i-kirito/portrait-gallery.git
+git clone https://github.com/OWNER/REPO.git
 cd portrait-gallery
 ```
 
@@ -90,6 +96,23 @@ curl http://localhost:18889/api/health
 
 应用会追加写入 `logs/gallery.log`，重启不会覆盖；日志按天轮转，并自动清理 3 天前的轮转文件。
 
+#### 方式三：Docker Hub 镜像
+
+`docker-compose.yaml` 默认构建并使用本地镜像 `hermes-portrait-gallery:latest`。
+如果要使用已经发布到 Docker Hub/GHCR 的镜像，通过 `PORTRAIT_GALLERY_IMAGE` 指定：
+
+```bash
+PORTRAIT_GALLERY_IMAGE=REGISTRY_OR_USER/hermes-portrait-gallery:1.3.2 docker compose up -d
+curl http://localhost:18889/api/health
+```
+
+本地开发仍可使用源码构建：
+
+```bash
+docker compose build
+docker compose up -d
+```
+
 ## 📐 架构
 
 ```
@@ -100,6 +123,10 @@ portrait-gallery/
 │   ├── core.py              # 生图核心（同步、元数据、翻译）
 │   ├── store.py             # 文件锁封装（并发安全读写）
 │   ├── scheduler.py         # LLM 日程生成
+│   ├── characters.py        # 多角色注册表、角色 prompt 与本地角色存储
+│   ├── group_chat.py        # 群聊房间/消息持久化与 Hermes bridge payload
+│   ├── calendar_context.py  # 周末、节假日、调休日等真实日期约束
+│   ├── text_repair.py       # 常见中文 mojibake 文本修复
 │   ├── zhuzhu/
 │   │   ├── core.py          # 生图底层（GPT Image / Gitee 调用）
 │   │   ├── generate.py      # 生图调度器（主题、风格、发型 LLM）
@@ -204,6 +231,28 @@ curl -X POST http://localhost:18889/api/hermes/update \
   -d '{"dry_run": false, "restart": true}'
 ```
 
+如果旧版本（尤其是 `v1.2.3`）在 Web 一键升级时返回 `local_or_api_key_required`，请在部署机器执行手动安全升级命令：
+
+```bash
+cd /path/to/portrait-gallery
+git fetch origin main
+git checkout origin/main -- VERSION README.md Dockerfile docker-compose.yaml app
+./app/run_launch.sh
+```
+
+Docker 部署可将最后一行换成：
+
+```bash
+docker compose up -d --build
+```
+
+如果检查更新报 `Attempt to decode JSON with unexpected mimetype: text/html`，通常是旧本地配置把 GitHub 更新地址写成了仓库网页。升级到 `v1.2.6` 后会自动兼容；旧版本可先把 `config/config.yaml` 里的 `update.github_api` 清空，或改成：
+
+```yaml
+update:
+  github_api: https://api.github.com/repos/OWNER/REPO/releases/latest
+```
+
 受保护路径包括：`.env`、`config/config.yaml`、`config/local.yaml`、`docker-compose.override.yml`、`data/`、`app/data/`、`logs/`、`app/references/uploads/`。
 
 ### 图片管理
@@ -236,7 +285,10 @@ curl -X POST http://localhost:18889/api/config/keys \
 | `GPT_IMAGE_API_KEY` | GPT Image API Key（覆盖 config） |
 | `GPT_IMAGE_BASE_URL` | GPT Image 端点（覆盖 config） |
 | `GITHUB_PROXY` | GitHub 更新检查/在线更新代理（也可在 Web 设置中填写） |
+| `GITHUB_REPOSITORY` | GitHub Release 检查仓库，格式 `OWNER/REPO` |
+| `GITHUB_RELEASE_API` | GitHub Release API 完整地址，优先级高于 `GITHUB_REPOSITORY` |
 | `GALLERY_API_KEY` | Web UI 认证密钥（留空则不认证） |
+| `PORTRAIT_GALLERY_IMAGE` | Docker Compose 使用的镜像名/标签，默认 `hermes-portrait-gallery:latest` |
 
 启用 `GALLERY_API_KEY` 后，命令行 API 需要带认证：
 
@@ -260,25 +312,64 @@ Hermes 调用 `/api/generate-custom`、`/api/hermes/text-to-image` 或 `/api/her
 
 ## 🖥️ 前端功能
 
-- **今日 Tab** — 横版大卡片，直接展示穿搭/日程/caption，点击图片全屏查看
+- **今日 Tab** — 横版大卡片，直接展示穿搭/日程/caption，今日生图计划可双击编辑活动内容
 - **全部 Tab** — 6 列网格，点击弹窗查看详情（收藏/分享/删除）
 - **收藏 Tab** — 筛选已收藏图片
 - **衣柜 Tab** — 展示收藏穿搭方案和 GPT 生成的衣架参考图，支持编辑、重生和图生图引用
+- **角色 Tab** — 管理本地角色、人设、外貌、绑定模型、单人照、设定图和多角色合照
+- **群聊 Tab** — 创建群聊房间、编辑参与角色、保存消息、删除/清空上下文、回溯重发回复和触发群聊图片生成
 - **🎀 穿搭生成** — 自定义 prompt + 参考图 + 尺寸选择
-- **⚙️ 设置** — Web UI 管理 API 密钥
+- **⚙️ 设置** — Web UI 管理 API 密钥、三级 LLM 模型链、Gitee 回退、日程风格和升级选项
 
 ## 🧾 Release Notes
+
+### v1.3.2
+
+- 今日生图计划支持在 Web UI 中双击活动内容直接编辑，回车或失焦保存，Esc 取消。
+- 新增 `/api/photo-jobs/plan` 接口，用于安全更新当天指定 `HH:mm` 计划项，并校验时间、空内容和长度。
+- 计划编辑会同步写回当天 `schedule`、`schedule_prompt`、`schedule_details`，并更新仍未执行的 APScheduler 生图任务参数。
+- 生图计划列表优先展示已保存日程里的活动内容，让手动调整在“已完成/待执行/失败重试”状态间保持一致。
+- 增加计划编辑 helper 单元测试，覆盖日程文本替换和 stale `schedule_details` 字段清理。
+
+### v1.3.1
+
+- 新增关键词偏好云：从用户输入的自定义生图 prompt 和收藏衣柜中提取高频穿搭/场景偏好，并作为每日穿搭日程的柔性参考。
+- 每日日程生成加入近期历史去重，减少连续出现“赖床/刷手机/做饭”等重复模板，让当天安排更有变化。
+- 群聊上下文管理增强：支持删除单条消息、清空上下文，并可对已生成回复执行回溯重发/重新生成。
+- 公共发布默认值进一步收敛：Docker Compose 使用中性本地镜像名，GitHub Release 检查支持 `GITHUB_REPOSITORY` / `GITHUB_RELEASE_API` 配置，文档与代码默认值避免绑定个人账号。
+- 内置写真风格 prompt 做了温和化处理，降低因模板过于显式而被上游图像服务拒绝的概率。
+
+### v1.3.0
+
+- 新增多角色系统：支持从运行时人设、配置和本地 `data/characters.json` 组合角色，Web UI 可新增、编辑、删除角色，并为角色生成单人照、设定图和合照。
+- 新增群聊工作台：支持群聊房间、参与者绑定、消息持久化、角色自动回复、撤回重跑，以及由群聊回复触发图片生成。
+- 设置页改为三级 LLM 模型链管理，主模型、备用模型和第三级模型会统一写入 `llm.models`，日程、caption、群聊、Hermes 描述和“现在在干嘛”都会按链路 fallback。
+- 日程生成加入真实日期上下文，内置 2026 法定节假日和调休上班日，并支持配置自定义假期/调休日，休息日会避免上班、上课、考试等冲突安排。
+- 生图参考链路强化：单人照、合照和群聊图可复用今日日程参考图，图生图提示词明确区分脸部参考和衣柜穿搭参考，并避免照抄参考图表情。
+- 增加中文 mojibake 文本修复、caption 指令泄漏过滤、LLM 请求重试与模型不可用快速切换，减少乱码、空文案和坏模型拖慢整条链路。
+- Docker 镜像布局调整为保留仓库内 `app/` 目录，Compose 默认使用本地镜像名，并可通过 `PORTRAIT_GALLERY_IMAGE` 指定任意发布镜像。
+
+### v1.2.6
+
+- 兼容旧本地配置把 GitHub 更新地址写成仓库网页 URL 的情况，自动转换为 Releases API。
+- 修复检查更新遇到 `text/html` 响应时抛出 `Attempt to decode JSON with unexpected mimetype` 的问题，改为明确提示配置修复方式。
+
+### v1.2.5
+
+- 修复 Docker/localhost 场景下一键安全升级可能被误判为远程写操作并返回 `local_or_api_key_required` 的问题。
+- 检查更新改为只读 GET 请求；升级被鉴权拦截时会显示手动安全升级命令。
+- 优化移动端顶部 Tab 和卡片底部 `收藏 / 分享 / 删除` 按钮尺寸。
 
 ### v1.2.4
 
 - 每日日程生成改为凌晨 `03:00-06:00` 随机窗口执行；窗口内生成失败会自动重试，过了窗口不再白天补跑。
 - `03:00-05:59` 作为日程生成静默时段，不安排也不执行自动生图；日程生图时间会避开整点并自然上下浮动。
-- 设置页移除固定的 GitHub Release API URL 输入项，检查更新仍由后端使用当前仓库固定地址。
+- 设置页移除固定的 GitHub Release API URL 输入项，检查更新由后端根据配置或环境变量解析当前仓库。
 
 ### v1.2.3
 
 - 设置页的 GitHub Release API URL 改为当前仓库固定值，不再要求用户手动填写，旧本地覆盖会在保存设置时自动清理。
-- 检查更新默认使用 `https://api.github.com/repos/i-kirito/portrait-gallery/releases/latest`，仍保留环境变量或配置覆盖能力，便于特殊部署。
+- 检查更新支持 `GITHUB_REPOSITORY` / `GITHUB_RELEASE_API` 或 `update.github_repo` / `update.github_api` 配置，便于特殊部署和 fork。
 - 默认画质提示词改为更自然的手机随拍风格，减少过度精修、塑料皮肤和 AI 感。
 
 ### v1.2.2

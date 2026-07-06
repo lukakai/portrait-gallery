@@ -10,6 +10,7 @@ import re
 import shutil
 import sys
 import time
+import uuid
 from pathlib import Path
 from typing import Optional
 from urllib.parse import quote
@@ -22,6 +23,7 @@ if _APP_DIR not in sys.path:
     sys.path.insert(0, _APP_DIR)
 
 from store import ScheduleStore
+from text_repair import repair_mojibake_text
 from settings import (
     DEFAULT_QUALITY_PREFIX,
     GENERIC_APPEARANCE,
@@ -66,6 +68,92 @@ def _retry_without_temperature_if_needed(resp, payload: dict, post_func):
     retry_payload = dict(payload)
     retry_payload.pop("temperature", None)
     return post_func(retry_payload)
+
+
+_LLM_RETRYABLE_STATUSES = {429, 500, 502, 503, 504}
+_LLM_DIRECT_FALLBACK_STATUSES = {401, 403}
+
+
+def _llm_response_detail(resp) -> str:
+    if resp is None:
+        return "no response"
+    try:
+        body = resp.json()
+        if isinstance(body, dict):
+            error = body.get("error")
+            if isinstance(error, dict):
+                return str(error.get("message") or error.get("code") or error.get("type") or "")[:240]
+            for key in ("message", "msg", "detail", "status"):
+                if body.get(key):
+                    return str(body.get(key))[:240]
+            return llm_response_excerpt(body, 240)
+    except Exception:
+        pass
+    return str(getattr(resp, "text", "") or f"HTTP {getattr(resp, 'status_code', 'unknown')}")[:240]
+
+
+def _llm_model_unavailable(detail: str) -> bool:
+    lower = str(detail or "").lower()
+    return any(
+        marker in lower
+        for marker in (
+            "model not found",
+            "model_not_found",
+            "does not exist",
+            "not exist",
+            "no permission",
+            "permission denied",
+            "unauthorized",
+            "forbidden",
+        )
+    )
+
+
+def _post_llm_with_retry(label: str, model: str, payload: dict, post_func, attempts: int = 2):
+    current_payload = dict(payload)
+    for attempt in range(1, max(1, attempts) + 1):
+        try:
+            resp = post_func(current_payload)
+            if getattr(resp, "status_code", None) == 400 and "temperature" in current_payload:
+                try:
+                    body = resp.json()
+                except Exception:
+                    body = getattr(resp, "text", "")
+                if llm_temperature_param_error(body):
+                    retry_payload = dict(current_payload)
+                    retry_payload.pop("temperature", None)
+                    print(f"[{label}] {model} rejects temperature; retrying without it", file=sys.stderr)
+                    resp = post_func(retry_payload)
+                    current_payload = retry_payload
+
+            status = getattr(resp, "status_code", None)
+            if status == 200:
+                return resp
+
+            detail = _llm_response_detail(resp)
+            print(
+                f"[{label}] llm request failed: model={model} attempt={attempt}/{attempts} status={status or 'no response'} detail={detail}",
+                file=sys.stderr,
+            )
+            if status in _LLM_DIRECT_FALLBACK_STATUSES or _llm_model_unavailable(detail):
+                return None
+            if attempt < attempts and (resp is None or status in _LLM_RETRYABLE_STATUSES):
+                time.sleep(1)
+                continue
+            return None
+        except requests.RequestException as e:
+            print(f"[{label}] llm request error: model={model} attempt={attempt}/{attempts} err={e}", file=sys.stderr)
+            if attempt < attempts:
+                time.sleep(1)
+                continue
+            return None
+        except Exception as e:
+            print(f"[{label}] llm error: model={model} attempt={attempt}/{attempts} err={e}", file=sys.stderr)
+            if attempt < attempts:
+                time.sleep(1)
+                continue
+            return None
+    return None
 
 
 _GALLERY_CONFIG_PATH = resolve_config_path()
@@ -248,7 +336,7 @@ THEMES = {
             "wrapped in a duvet, peeking out with only face visible, sleepy smile",
             "sitting at a small desk, writing in a journal, glancing up at camera",
             "standing by the window holding a small potted plant, soft morning light from the side",
-            "pouring herself a glass of water in the kitchen, caught in a camelid moment",
+            "pouring herself a glass of water in the kitchen, caught in a candid moment",
             "sitting on the edge of the bed, tying hair up while looking at camera",
         ],
         "env": ["messy cozy bedroom with morning sunlight through curtains", "sunlit bathroom with steam", "cozy bedroom corner with plush toys and polaroid photos", "small kitchen nook with warm sunlight", "window seat with morning light filtering in"],
@@ -321,48 +409,47 @@ THEMES = {
     },
     "sexy": {
         "clothing": [
-            "a tiny, sheer white lace camisole that is completely unbuttoned and open, revealing her youthful bare chest",
-            "a very thin, soaked and transparent white cotton T-shirt that clings tightly to her skin and breasts",
-            "an oversized white silk boyfriend shirt, worn completely unbuttoned and falling off one shoulder",
-            "only a sheer lace robe, open at the front, exposing her soft skin and youthful silhouette",
-            "a micro silk slip dress with dangerously thin straps and a very deep plunging neckline",
-            "a semi-sheer white cotton tank top pulled up to just above her breasts, fully exposing them",
-            "a delicate Japanese sukumizu, dripping wet and tightly hugging her body",
-            "an incredibly thin, pale blue negligee with intricate lace",
-            "a dangerously tight micro mini bodycon skirt riding up, showing off her thighs",
-            "an extremely minimal string bikini made of practically nothing, just tiny strips of cloth",
-            "a naughty and tight nurse uniform unbuttoned deeply, with a cute nurse cap",
+            "elegant black satin slip dress with a modest lace-trim neckline",
+            "silky champagne wrap dress with long sleeves and a soft waist tie",
+            "off-shoulder velvet midi dress with refined evening styling",
+            "tailored white silk blouse tucked into a high-waist skirt",
+            "sleek burgundy cocktail dress with a classic square neckline",
+            "lace-trim camisole layered under an oversized blazer",
+            "minimalist black jumpsuit with a satin belt",
+            "soft cashmere cardigan over a satin midi skirt",
+            "sheer chiffon shawl layered over a solid evening dress",
+            "elegant halter-neck gown with full coverage and flowing fabric",
         ],
         "pose": [
-            "sitting on the floor by the bed, looking up at the camera with a shy and curious expression",
-            "lying on her back on the soft bed, looking at the camera with a playful and innocent smile",
-            "kneeling on the bed while looking down shyly, lifting her shirt slightly",
-            "standing in front of a mirror, looking over her shoulder with a bashful gaze",
-            "sitting on a fluffy white rug, leaning forward with a mix of innocence and allure",
-            "crouching down shyly, her high pigtails falling over her shoulders",
-            "sprawled seductively on the couch, one leg slightly raised",
-            "pressing herself against a glass window, looking out at the city night",
+            "standing by a tall window with one hand on the curtain, confident smile",
+            "sitting on a lounge chair with relaxed shoulders, looking at the camera",
+            "leaning beside a vanity table while adjusting an earring",
+            "walking through a boutique hotel corridor, glancing back with a composed smile",
+            "sitting on the edge of a sofa with poised posture and crossed ankles",
+            "holding a small clutch with both hands, head tilted slightly",
+            "standing beside a floor lamp, one hand resting lightly on the shade",
+            "posing in front of a mirror while checking the outfit details",
         ],
         "hair": [
-            "tied in two high pigtails with cute white ribbons",
-            "styled in a messy, cute low bun with loose strands",
-            "flowing down in long, soft wet waves",
-            "in two cute space buns on top of her head",
-            "in a relaxed high ponytail with wispy bangs",
+            "styled in a polished low bun with loose face-framing strands",
+            "soft side-part waves brushed neatly over one shoulder",
+            "sleek high ponytail with a satin ribbon",
+            "smooth shoulder-length waves with a pearl hair clip",
+            "relaxed half-up style with tidy wispy bangs",
         ],
         "environment": [
-            "a sun-drenched cute bedroom filled with plush toys and soft pillows, cozy indoor only",
-            "a modern bathroom with gentle steam in the air and warm lighting, indoor only",
-            "a cozy bedroom retreat with messy white silk sheets, indoor only",
-            "sitting on a fluffy white rug in an intimate indoor bedroom setting",
-            "a dimly lit laundry room leaning against a dryer, indoor only",
-            "a sleek minimalist kitchen sitting on the counter, indoor only",
-            "a walk-in closet filled with dresses and soft warm lighting, indoor only",
-            "a cozy living room sofa surrounded by warm fairy lights, indoor only",
+            "a boutique hotel lounge with warm wood panels and soft evening light",
+            "a private photo studio with neutral backdrop and elegant props",
+            "a walk-in closet filled with dresses and soft warm lighting",
+            "a refined apartment living room with a velvet sofa and floor lamp",
+            "a quiet rooftop terrace with city lights in the distance",
+            "an elegant dressing room with a full-length mirror and vanity lights",
+            "a modern gallery hallway with polished stone floor and subtle spotlights",
+            "a candlelit restaurant corner with tasteful decor and shallow depth of field",
         ],
         "lighting": [
             "Soft afternoon sunlight filtering through sheer curtains",
-            "Warm ambient indoor lighting reflecting off her glowing skin",
+            "Warm ambient indoor lighting with soft highlights",
             "Moody golden-hour light casting soft shadows",
             "Cool blue moonlight combined with warm candlelight",
             "Bright neon lights from outside reflecting through the window",
@@ -656,11 +743,13 @@ def _caption_voice_hint(persona: dict) -> str:
 
 
 def _caption_rejection_reason(caption: str, schedule_time: str = "") -> str:
+    caption = repair_mojibake_text(caption)
     if not caption:
         return "empty"
     checks = (
         ("too_short", not _caption_is_usable(caption)),
         ("persona_leak", _caption_has_persona_leak(caption)),
+        ("instruction_leak", _caption_has_instruction_leak(caption)),
         ("reader_address", _caption_addresses_reader(caption, schedule_time)),
         ("tone_problem", _caption_has_tone_problem(caption, schedule_time)),
         ("schedule_conflict", _caption_conflicts_with_schedule(caption, schedule_time)),
@@ -676,13 +765,14 @@ def _caption_rejection_reason(caption: str, schedule_time: str = "") -> str:
 
 
 def _caption_is_usable(caption: str) -> bool:
+    caption = repair_mojibake_text(caption)
     text = re.sub(r"\s+", "", str(caption or "")).strip("，,。.!！?；;、")
     return len(text) >= 4
 
 
 def _best_caption(caption: str = "", fallback: str = "") -> str:
-    caption = str(caption or "").strip()
-    fallback = str(fallback or "").strip()
+    caption = repair_mojibake_text(caption).strip()
+    fallback = repair_mojibake_text(fallback).strip()
     if _caption_is_usable(caption):
         return caption
     if _caption_is_usable(fallback):
@@ -691,6 +781,7 @@ def _best_caption(caption: str = "", fallback: str = "") -> str:
 
 
 def _scene_caption_fallback(theme: str, persona: dict, caption: str = "", schedule_time: str = "") -> str:
+    caption = repair_mojibake_text(caption)
     rejection_reason = _caption_rejection_reason(caption, schedule_time)
     if not rejection_reason:
         short = _shorten_caption(caption)
@@ -710,6 +801,33 @@ def _caption_has_persona_leak(caption: str) -> bool:
     )
     return any(marker in text for marker in leak_markers)
 
+
+def _caption_has_instruction_leak(caption: str) -> bool:
+    text = re.sub(r"\s+", "", str(caption or ""))
+    if not text:
+        return False
+    markers = (
+        "我们被要求",
+        "被要求以",
+        "口吻写一句",
+        "照片的配文",
+        "内容要像",
+        "真实想法",
+        "具体到正在做的事",
+        "下一步安排",
+        "当前日程",
+        "请写一条",
+        "直接输出",
+        "不要加引号",
+        "不要写长段落",
+        "禁止使用",
+        "输出1-2句",
+        "小心思要像",
+        "下面的口吻",
+        "读者称呼",
+        "这是一条",
+    )
+    return any(marker in text for marker in markers)
 
 
 def _caption_addresses_reader(caption: str, schedule_time: str = "") -> bool:
@@ -1027,7 +1145,7 @@ def save_image(img_data: bytes, theme: str, model_name: str, style: Optional[str
     ts = int(time.time())
     ext = detect_extension(img_data)
     style_part = f"_{style}" if style else ""
-    filename = f"xuefeng_{theme}{style_part}_{ts}.{ext}"
+    filename = f"xuefeng_{theme}{style_part}_{time.time_ns()}_{uuid.uuid4().hex[:8]}_{ts}.{ext}"
     path = os.path.join(WORKSPACE_MEDIA, filename)
 
     with open(path, "wb") as f:
@@ -1248,33 +1366,38 @@ def _translate_outfit(prompt: str, style_name: str) -> str:
         models = get_llm_models()
         if not models:
             return _fallback_from_prompt()
-        payload = {
-            "model": models[0],
-            "messages": [
-                {"role": "system", "content": sys_prompt},
-                {"role": "user", "content": extraction_input[:500]},
-            ],
-            "max_tokens": 150,
-            "temperature": 0.3,
-        }
-        resp = requests.post(get_cpa_chat_url(),
-                             headers=headers, json=payload, timeout=15)
-        resp = _retry_without_temperature_if_needed(
-            resp,
-            payload,
-            lambda retry_payload: requests.post(
-                get_cpa_chat_url(),
-                headers=headers,
-                json=retry_payload,
-                timeout=15,
-            ),
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            choices = data.get("choices") if isinstance(data, dict) else []
-            content = llm_choice_text(choices[0]) if choices else ""
-            if content:
-                return content
+        for model in models:
+            payload = {
+                "model": model,
+                "messages": [
+                    {"role": "system", "content": sys_prompt},
+                    {"role": "user", "content": extraction_input[:500]},
+                ],
+                "max_tokens": 150,
+                "temperature": 0.3,
+            }
+            resp = _post_llm_with_retry(
+                "translate_outfit",
+                model,
+                payload,
+                lambda request_payload: requests.post(
+                    get_cpa_chat_url(),
+                    headers=headers,
+                    json=request_payload,
+                    timeout=15,
+                ),
+            )
+            if resp is None:
+                continue
+            try:
+                data = resp.json()
+                choices = data.get("choices") if isinstance(data, dict) else []
+                content = llm_choice_text(choices[0]) if choices else ""
+                if content:
+                    return content
+                print(f"[translate_outfit] empty response: model={model}", file=sys.stderr)
+            except Exception as e:
+                print(f"[translate_outfit] invalid response: model={model} err={e}", file=sys.stderr)
     except Exception as e:
         print(f"[translate_outfit] LLM failed: {e}", file=sys.stderr)
     return _fallback_from_prompt()
@@ -1500,31 +1623,29 @@ def enhance_prompt(user_input: str, theme: Optional[str] = None) -> str:
             "max_tokens": config_int(_GALLERY_CONFIG, "llm.enhance_max_tokens", 400, 1),
             "temperature": config_float(_GALLERY_CONFIG, "llm.enhance_temperature", 0.85, 0),
         }
-        try:
-            resp = REQUEST_SESSION.post(
+        resp = _post_llm_with_retry(
+            "enhance",
+            model,
+            payload,
+            lambda request_payload: REQUEST_SESSION.post(
                 get_cpa_chat_url(),
                 headers=headers,
-                json=payload,
+                json=request_payload,
                 timeout=config_int(_GALLERY_CONFIG, "llm.enhance_timeout", 25, 1),
-            )
-            resp = _retry_without_temperature_if_needed(
-                resp,
-                payload,
-                lambda retry_payload: REQUEST_SESSION.post(
-                    get_cpa_chat_url(),
-                    headers=headers,
-                    json=retry_payload,
-                    timeout=config_int(_GALLERY_CONFIG, "llm.enhance_timeout", 25, 1),
-                ),
-            )
+            ),
+        )
+        if resp is None:
+            continue
+        try:
             if resp.status_code == 200:
                 data = resp.json()
                 choices = data.get("choices") if isinstance(data, dict) else []
                 content = llm_choice_text(choices[0]) if choices else ""
                 if content:
                     return content.strip()
+                print(f"[enhance] empty response: model={model}", file=sys.stderr)
         except Exception as e:
-            print(f"[enhance] {model} failed: {e}", file=sys.stderr)
+            print(f"[enhance] invalid response: model={model} err={e}", file=sys.stderr)
 
     return user_input
 
@@ -1616,6 +1737,7 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
         timeout = config_int(_GALLERY_CONFIG, "llm.caption_timeout", 30, 1)
         caption_max_tokens = max(900, min(config_int(_GALLERY_CONFIG, "llm.caption_max_tokens", 900, 1), 1200))
         for model in models:
+            switch_model = False
             for mode, user_content in request_variants:
                 attempts = 3 if activity else 1
                 for attempt in range(1, attempts + 1):
@@ -1628,22 +1750,20 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
                         "max_tokens": caption_max_tokens,
                         "temperature": config_float(_GALLERY_CONFIG, "llm.caption_temperature", 0.9, 0),
                     }
-                    resp = REQUEST_SESSION.post(
-                        chat_url,
-                        headers=headers,
-                        json=payload,
-                        timeout=timeout,
-                    )
-                    resp = _retry_without_temperature_if_needed(
-                        resp,
+                    resp = _post_llm_with_retry(
+                        "caption",
+                        model,
                         payload,
-                        lambda retry_payload: REQUEST_SESSION.post(
+                        lambda request_payload: REQUEST_SESSION.post(
                             chat_url,
                             headers=headers,
-                            json=retry_payload,
+                            json=request_payload,
                             timeout=timeout,
                         ),
                     )
+                    if resp is None:
+                        switch_model = True
+                        break
                     try:
                         data = resp.json()
                     except Exception:
@@ -1655,7 +1775,7 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
                         )
                         continue
                     choices = data.get("choices") if isinstance(data, dict) else []
-                    caption = llm_choice_text(choices[0]) if choices else ""
+                    caption = repair_mojibake_text(llm_choice_text(choices[0]) if choices else "")
                     if not caption:
                         print(
                             f"[caption] llm returned empty caption: model={model} mode={mode} attempt={attempt}/{attempts} detail={llm_response_excerpt(data, 180)}",
@@ -1672,6 +1792,10 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
                     result = _shorten_caption(caption)
                     if result:
                         return result
+                if switch_model:
+                    break
+            if switch_model:
+                continue
     except Exception as e:
         print(f"[caption] llm failed: {e}", file=sys.stderr)
 

@@ -4,12 +4,12 @@ description: >
   Install, configure, run, and operate the Portrait Gallery AI outfit portrait
   system. Use when the user wants an AI agent to set up the gallery from GitHub,
   start or debug the local service, configure image/LLM API keys, generate daily
-  outfit schedules, create custom portrait images, inspect the web gallery, or
-  call the REST API for photo management.
+  outfit schedules, create custom portrait images, manage characters and group
+  chats, inspect the web gallery, or call the REST API for photo management.
 metadata:
   short-description: Run and operate the AI outfit portrait gallery
   openclaw:
-    homepage: https://github.com/i-kirito/portrait-gallery
+    homepage: https://github.com/OWNER/REPO
 ---
 
 # Portrait Gallery Skill
@@ -25,15 +25,15 @@ Gallery service.
 Ask Codex to install the skill from GitHub:
 
 ```text
-Use $skill-installer to install https://github.com/i-kirito/portrait-gallery as a skill.
-Use repo i-kirito/portrait-gallery, path ., and name portrait-gallery.
+Use $skill-installer to install https://github.com/OWNER/REPO as a skill.
+Use repo OWNER/REPO, path ., and name portrait-gallery.
 ```
 
 If running the installer script manually:
 
 ```bash
 python ~/.codex/skills/.system/skill-installer/scripts/install-skill-from-github.py \
-  --repo i-kirito/portrait-gallery \
+  --repo OWNER/REPO \
   --path . \
   --name portrait-gallery
 ```
@@ -45,7 +45,7 @@ Restart the agent after installation so it can discover the new skill.
 Install this repository URL as a skill source:
 
 ```text
-https://github.com/i-kirito/portrait-gallery
+https://github.com/OWNER/REPO
 ```
 
 If the agent asks for a skill path, use `.`. If it asks for a skill name, use
@@ -76,6 +76,11 @@ Portrait Gallery is a local AI outfit portrait system:
 - Generates a daily outfit plan and HH:mm schedule with an LLM.
 - Dynamically schedules image-generation jobs from the generated schedule.
 - Generates portraits with OpenAI-compatible image APIs (GPT Image / AxonHub / custom endpoints), Gemini, and optional Gitee z-image-turbo fallback.
+- Manages multiple local/runtime characters for single portraits, reference sheets, and group photos.
+- Provides a group-chat workspace with persistent rooms, participant bindings, LLM-backed character replies, and optional image tool calls.
+- Uses a multi-model LLM chain (`llm.models`) for schedule generation, captions, group chat, and fallback inference.
+- Extracts a keyword cloud from user prompts and favorite wardrobe items, then uses it as a soft daily schedule reference.
+- Injects real date context for weekends, public holidays, make-up workdays, and configured calendar overrides.
 - Serves a local Web gallery for today/all/favorites/custom generation.
 - Stores runtime data in `data/schedule_data.json` and images in `data/images/`.
 - Exposes a REST API for agents and integrations.
@@ -87,7 +92,7 @@ Portrait Gallery is a local AI outfit portrait system:
 If the user already has a checkout, work there. Otherwise clone it:
 
 ```bash
-git clone https://github.com/i-kirito/portrait-gallery.git
+git clone https://github.com/OWNER/REPO.git
 cd portrait-gallery
 ```
 
@@ -112,6 +117,12 @@ Docker run:
 ```bash
 docker compose build
 docker compose up -d
+```
+
+Published image run:
+
+```bash
+PORTRAIT_GALLERY_IMAGE=REGISTRY_OR_USER/hermes-portrait-gallery:1.3.2 docker compose up -d
 ```
 
 ### 3. Configure Keys
@@ -219,12 +230,43 @@ curl -X POST http://localhost:18889/api/images/<image_filename>/favorite
 curl -X DELETE http://localhost:18889/api/images/<image_filename>
 ```
 
+### Manage Characters
+
+```bash
+curl http://localhost:18889/api/characters
+curl -X POST http://localhost:18889/api/characters \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Mika","persona":"warm, curious, lively","appearance":"natural realistic portrait subject"}'
+curl -X POST http://localhost:18889/api/characters/<character_id>/generate \
+  -H "Content-Type: application/json" \
+  -d '{"prompt":"walking through a quiet bookstore","shot_type":"half_body"}'
+```
+
+### Use Group Chat
+
+```bash
+curl http://localhost:18889/api/group-chat/rooms
+curl -X POST http://localhost:18889/api/group-chat/rooms \
+  -H "Content-Type: application/json" \
+  -d '{"name":"Daily room","participants":[{"character_id":"default"}]}'
+curl -X POST http://localhost:18889/api/group-chat/rooms/<room_id>/messages \
+  -H "Content-Type: application/json" \
+  -d '{"content":"今天想拍一张书店合照","sender":{"type":"user","display_name":"user"}}'
+curl -X POST http://localhost:18889/api/group-chat/rooms/<room_id>/reply \
+  -H "Content-Type: application/json" \
+  -d '{}'
+```
+
 ## Important Files
 
 - `app/main.py` - aiohttp service startup and APScheduler orchestration.
 - `app/scheduler.py` - LLM daily outfit and schedule generation.
 - `app/web_server.py` - REST API, static files, gallery routes, settings.
 - `app/image_gen.py` - async wrapper around the image-generation subprocess.
+- `app/characters.py` - local/runtime character registry and prompt helpers.
+- `app/group_chat.py` - file-locked group chat rooms, messages, and bridge payloads.
+- `app/calendar_context.py` - date-aware holiday/weekend/workday schedule context.
+- `app/text_repair.py` - mojibake and display-copy repair helpers.
 - `app/zhuzhu/generate.py` - unified image-generation CLI.
 - `app/zhuzhu/core.py` - prompt building, metadata, gallery sync.
 - `app/web/index.html` - single-file Web UI.
