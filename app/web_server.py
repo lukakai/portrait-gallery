@@ -32,7 +32,7 @@ import uuid
 
 import aiohttp
 from aiohttp import web
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from characters import (
     LOCAL_CHARACTER_SOURCE,
@@ -1884,6 +1884,44 @@ class GalleryServer:
         prompt_parts.append("High detail fashion catalog lighting, realistic textiles and hair fibers, sharp edges, centered composition, generous margins around the outfit and wig.")
         return " ".join(part.strip() for part in prompt_parts if part).strip()
 
+    def _wardrobe_seed_reference_image(self) -> str:
+        seed_path = os.path.join(self.wardrobe_reference_dir, "_wardrobe_seed_reference.png")
+        if os.path.isfile(seed_path):
+            return seed_path
+
+        try:
+            os.makedirs(self.wardrobe_reference_dir, exist_ok=True)
+            width, height = 1024, 1365
+            img = Image.new("RGB", (width, height), "#fbf8f3")
+            draw = ImageDraw.Draw(img)
+
+            draw.rectangle((0, 0, width, height), fill="#fbf8f3")
+            draw.rounded_rectangle((70, 78, width - 70, height - 78), radius=46, outline="#e8ddd0", width=6)
+            draw.line((220, 360, width - 220, 360), fill="#c8b7a8", width=12)
+            draw.line((260, 360, 260, height - 180), fill="#dacdbf", width=10)
+            draw.line((width - 260, 360, width - 260, height - 180), fill="#dacdbf", width=10)
+            draw.line((210, height - 180, width - 210, height - 180), fill="#dacdbf", width=10)
+
+            hanger_center = width // 2
+            draw.arc((hanger_center - 42, 245, hanger_center + 42, 325), 205, 520, fill="#b69b86", width=8)
+            draw.line((hanger_center, 325, hanger_center, 360), fill="#b69b86", width=8)
+            draw.line((hanger_center, 360, hanger_center - 170, 490), fill="#b69b86", width=8)
+            draw.line((hanger_center, 360, hanger_center + 170, 490), fill="#b69b86", width=8)
+            draw.line((hanger_center - 170, 490, hanger_center + 170, 490), fill="#b69b86", width=8)
+
+            draw.ellipse((155, 560, 295, 700), fill="#f1e8dc", outline="#d5c7b7", width=5)
+            draw.line((225, 700, 225, 880), fill="#d5c7b7", width=8)
+            draw.line((165, 880, 285, 880), fill="#d5c7b7", width=8)
+            draw.rounded_rectangle((380, 590, 645, 980), radius=34, fill="#f4eee6", outline="#d8cabd", width=5)
+            draw.rounded_rectangle((680, 660, 820, 955), radius=28, fill="#f4eee6", outline="#d8cabd", width=5)
+            draw.ellipse((690, 1000, 810, 1060), fill="#eee3d8", outline="#d8cabd", width=5)
+            draw.ellipse((835, 1000, 955, 1060), fill="#eee3d8", outline="#d8cabd", width=5)
+            img.save(seed_path, "PNG", optimize=True)
+            return seed_path
+        except Exception as e:
+            logger.error("Create wardrobe seed reference failed: %s", e)
+            return ""
+
     def _set_favorite_outfit_wardrobe_status(self, outfit_id: str, status: str, message: str = "", error: str = ""):
         outfit_id = str(outfit_id or "").strip()
         status = str(status or "").strip()
@@ -1966,6 +2004,10 @@ class GalleryServer:
                     return self._favorite_outfit_wardrobe_payload(item)
 
                 self._set_favorite_outfit_wardrobe_status(outfit_id, "generating", "衣架图生成中")
+                wardrobe_ref_image = self._wardrobe_seed_reference_image()
+                if not wardrobe_ref_image:
+                    self._set_favorite_outfit_wardrobe_status(outfit_id, "failed", "衣架图参考底图创建失败", "wardrobe_seed_failed")
+                    raise RuntimeError("wardrobe_seed_failed")
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
@@ -1973,6 +2015,7 @@ class GalleryServer:
                         "gptimage",
                         prompt,
                         size=size,
+                        ref_image=wardrobe_ref_image,
                         output_dir=self.wardrobe_reference_dir,
                         url_prefix="/local-refs/wardrobe",
                         source="wardrobe",
@@ -1994,11 +2037,13 @@ class GalleryServer:
                     "size": size,
                     "source": result.get("source") or "wardrobe",
                     "model_name": result.get("model_name") or "",
-                    "generation_mode": "text2img",
+                    "generation_mode": "img2img",
                     "created_at": int(time.time()),
                     "file_size_bytes": int(result.get("file_size_bytes") or 0),
                     "width": int(result.get("width") or 0),
                     "height": int(result.get("height") or 0),
+                    "ref_image": os.path.basename(wardrobe_ref_image),
+                    "ref_image_path": wardrobe_ref_image,
                 }
 
                 previous_wardrobe = self._favorite_outfit_wardrobe_payload(item)

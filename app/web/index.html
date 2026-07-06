@@ -1697,30 +1697,33 @@ textarea:focus-visible,
 }
 .wardrobe-copy::-webkit-scrollbar { display: none; }
 .wardrobe-actions {
-  display: flex;
-  flex-wrap: nowrap;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 6px;
-  justify-content: stretch;
+  align-items: stretch;
   margin-top: auto;
   padding-top: 3px;
 }
 .wardrobe-action-btn,
 .wardrobe-remove-btn {
-  flex: 1 1 0;
   min-width: 0;
-  min-height: 28px;
-  padding: 0 5px;
+  min-height: 34px;
+  padding: 5px 8px;
   border: 1px solid rgba(233,30,99,0.2);
   border-radius: 999px;
   background: #fff7fb;
   color: #c2185b;
-  font-size: 10px;
+  font-size: 11px;
   font-weight: 800;
-  line-height: 1;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  line-height: 1.15;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  text-align: center;
 }
 .wardrobe-action-btn {
   border-color: rgba(139,92,246,0.22);
@@ -1734,10 +1737,11 @@ textarea:focus-visible,
   background: #f0e7ff;
   border-color: rgba(139,92,246,0.28);
 }
+.wardrobe-remove-btn { grid-column: 1 / -1; }
 .wardrobe-remove-btn:hover { background: #ffeaf3; border-color: rgba(233,30,99,0.34); }
 .wardrobe-remove-btn:disabled { cursor: default; opacity: 0.58; }
 .wardrobe-status {
-  flex: 1 1 100%;
+  grid-column: 1 / -1;
   min-height: 18px;
   color: #7c3aed;
   font-size: 11px;
