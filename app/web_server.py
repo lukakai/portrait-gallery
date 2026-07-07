@@ -77,6 +77,9 @@ from settings import (
     normalize_custom_shot_type,
     normalize_persona_source,
     normalize_push_channel,
+    sanitize_schedule_forbidden_detail,
+    sanitize_schedule_forbidden_text,
+    schedule_forbidden_negative_clause,
     default_image_dir,
     normalize_image_dir,
     resolve_builtin_reference_dir,
@@ -2266,19 +2269,32 @@ class GalleryServer:
         rel = self._safe_image_relative_path(filename)
         if rel is None:
             return ""
+        rel_text = os.path.join(*rel.parts)
         for base in self._image_search_dirs():
-            base_path = Path(base).resolve()
-            candidate = (base_path / rel).resolve()
+            base_path = os.path.abspath(os.path.expanduser(base))
+            candidate = os.path.abspath(os.path.join(base_path, rel_text))
             try:
-                candidate.relative_to(base_path)
+                if os.path.commonpath([base_path, candidate]) != base_path:
+                    continue
             except ValueError:
                 continue
-            if candidate.exists() and candidate.is_file():
-                return str(candidate)
+            if os.path.isfile(candidate):
+                return candidate
         return ""
 
     def _image_exists(self, filename: str) -> bool:
         return bool(self._image_file_path(filename))
+
+    @staticmethod
+    def _image_content_type(path: str) -> str:
+        suffix = Path(path).suffix.lower()
+        return {
+            ".png": "image/png",
+            ".jpg": "image/jpeg",
+            ".jpeg": "image/jpeg",
+            ".webp": "image/webp",
+            ".gif": "image/gif",
+        }.get(suffix, "application/octet-stream")
 
     def _image_stat(self, filename: str):
         path = self._image_file_path(filename)
@@ -2348,7 +2364,35 @@ class GalleryServer:
         path = self._image_file_path(filename)
         if not path:
             raise web.HTTPNotFound()
-        return web.FileResponse(path)
+        try:
+            stat = os.stat(path)
+        except FileNotFoundError:
+            raise web.HTTPNotFound()
+        except OSError as exc:
+            logger.error("Serve image stat failed: %s, %s", path, exc)
+            raise web.HTTPInternalServerError()
+
+        headers = {
+            "Cache-Control": "public, max-age=31536000, immutable",
+        }
+        if request.method == "HEAD":
+            headers["Content-Length"] = str(stat.st_size)
+            return web.Response(
+                headers=headers,
+                content_type=self._image_content_type(path),
+            )
+
+        try:
+            data = Path(path).read_bytes()
+        except OSError as exc:
+            logger.error("Serve image read failed: %s, %s", path, exc)
+            raise web.HTTPInternalServerError()
+
+        return web.Response(
+            body=data,
+            headers=headers,
+            content_type=self._image_content_type(path),
+        )
 
     def _gallery_entry_for_image(self, img_id: str) -> dict:
         img_id = str(img_id or "").strip()
@@ -3446,6 +3490,32 @@ class GalleryServer:
             return text[:limit].rstrip("，,。.!！?；;、") + "…"
         return text
 
+    @staticmethod
+    def _compose_schedule_plan_caption(parts: list[str], max_len: int = 120) -> str:
+        prefix = "今天先按这个节奏来："
+        suffix = "，别把事情都拖到最后。"
+        clean_parts = [str(part or "").strip("，,。.!！?；;、") for part in parts if str(part or "").strip()]
+        if not clean_parts:
+            return ""
+
+        caption = prefix + "，".join(clean_parts) + suffix
+        if len(caption) <= max_len:
+            return caption
+
+        selected = []
+        body_budget = max_len - len(prefix) - len(suffix)
+        used = 0
+        for part in clean_parts:
+            addition = len(part) + (1 if selected else 0)
+            if selected and used + addition > body_budget:
+                continue
+            if not selected and addition > body_budget:
+                selected.append(part[: max(4, body_budget - 1)].rstrip("，,。.!！?；;、") + "…")
+                break
+            selected.append(part)
+            used += addition
+        return prefix + "，".join(selected or clean_parts[:1]) + suffix
+
     @classmethod
     def _build_schedule_plan_caption(cls, schedule_items: list[dict]) -> str:
         buckets = {"上午": [], "午后": [], "晚上": []}
@@ -3477,13 +3547,14 @@ class GalleryServer:
         if not parts:
             return ""
 
-        caption = "今天先按这个节奏来：" + "，".join(parts) + "，别把事情都拖到最后。"
-        return caption[:90].rstrip("，,。.!！?；;、") + "。"
+        return cls._compose_schedule_plan_caption(parts)
 
     @staticmethod
     def _caption_is_schedule_plan(caption: str) -> bool:
         text = re.sub(r"\s+", "", str(caption or ""))
         if not text:
+            return False
+        if "拖到最。" in text or "拖到最！" in text:
             return False
         bad_markers = (
             "主人", "亲一口", "抱抱", "怀里", "来找我玩", "被夸",
@@ -7865,8 +7936,14 @@ JSON 格式：
                     "message": "今日日程里没有可用于生图的时间点。",
                 }, status=400)
 
-            now_detail = await self._infer_generate_now_detail(now, daily)
+            forbidden_keywords = load_schedule_forbidden_keywords(self.config, self.data_dir)
+            now_detail = self._schedule_generate_now_detail(now, daily)
+            if forbidden_keywords:
+                now_detail = sanitize_schedule_forbidden_detail(now_detail, forbidden_keywords)
             now_activity = self._clean_activity_text(now_detail.get("activity_zh", ""), max_len=72)
+            if not now_activity and forbidden_keywords:
+                now_activity = "根据今日日程整理当前状态"
+                now_detail["activity_zh"] = now_activity
             if not now_activity:
                 return web.json_response({
                     "error": "generate_now_inference_failed",
@@ -7877,11 +7954,20 @@ JSON 格式：
             now_detail["activity_zh"] = now_activity
             # B1 (2026-06-26): 把主人微调 hint 叠加进活动与日程时间，影响 prompt/参考图选择
             if extra_hint:
-                now_activity = self._clean_activity_text(f"{now_activity}，{extra_hint}", max_len=96)
+                if forbidden_keywords:
+                    extra_hint = sanitize_schedule_forbidden_text(extra_hint, forbidden_keywords, drop_fragments=False)
+                if extra_hint:
+                    now_activity = self._clean_activity_text(f"{now_activity}，{extra_hint}", max_len=96)
+                    now_detail["activity_zh"] = now_activity
+                    now_detail["extra_hint"] = extra_hint
+            if forbidden_keywords:
+                now_detail = sanitize_schedule_forbidden_detail(now_detail, forbidden_keywords)
+                now_activity = self._clean_activity_text(now_detail.get("activity_zh", now_activity), max_len=96) or now_activity
                 now_detail["activity_zh"] = now_activity
-                now_detail["extra_hint"] = extra_hint
-            schedule_time = f"{now_str} {now_activity}".strip()
-            schedule_detail_json = json.dumps(now_detail, ensure_ascii=False, separators=(",", ":"))
+            # Pass only the clock time into generate.py. The image prompt must be
+            # built from today's persisted schedule_details, not a second LLM
+            # interpretation of the current moment.
+            schedule_time = now_str
             theme = self._theme_for_schedule_time(now_str)
             base_style = str(daily.get("base_style") or "").strip().lower()
             if base_style not in {"cool", "girly", "sweet"}:
@@ -7936,14 +8022,20 @@ JSON 格式：
             child_env = self._child_env(child_env_extra)
             selected_reference = {}
             if engine == "gptimage":
+                def _safe_context_text(value: str, *, drop_fragments: bool = True) -> str:
+                    if not forbidden_keywords:
+                        return str(value or "")
+                    return sanitize_schedule_forbidden_text(value, forbidden_keywords, drop_fragments=drop_fragments)
+
                 reference_context = json.dumps({
                     "source": "generate_now",
                     "time": now_str,
                     "activity": now_activity,
-                    "outfit_style": daily.get("outfit_style", ""),
-                    "outfit": daily.get("outfit", ""),
-                    "reference_query": daily.get("reference_query", ""),
-                    "prompt": daily.get("prompt", ""),
+                    "outfit_style": _safe_context_text(daily.get("outfit_style", ""), drop_fragments=False),
+                    "outfit": _safe_context_text(daily.get("outfit", ""), drop_fragments=False),
+                    "reference_query": _safe_context_text(daily.get("reference_query", "")),
+                    "prompt": _safe_context_text(daily.get("prompt", ""), drop_fragments=False),
+                    "visual_exclusion": schedule_forbidden_negative_clause(forbidden_keywords),
                     "schedule_time": schedule_time,
                     "schedule_detail": now_detail,
                 }, ensure_ascii=False)
@@ -7963,7 +8055,6 @@ JSON 格式：
                 "--source", "web",
                 "--engine", engine,
                 "--schedule-time", schedule_time,
-                "--schedule-detail-json", schedule_detail_json,
             ]
             if selected_reference.get("path") and engine == "gptimage":
                 cmd.extend(["--ref-image", selected_reference["path"]])

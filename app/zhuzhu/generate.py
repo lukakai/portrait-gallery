@@ -14,6 +14,7 @@ import requests
 from core import (
     CONFIG_PATH,
     SECRETARY_SCHEDULE_PATH,
+    _GALLERY_CONFIG,
     _strip_hair_color_from_schedule_hair,
     build_caption_for_image,
     build_prompt,
@@ -29,7 +30,16 @@ from generate_gitee import MODEL_NAME as GITEE_MODEL_NAME
 from generate_gitee import generate as generate_with_gitee
 from generate_gptimage import GPTIMAGE_DIRECT_MODEL
 from generate_gptimage import generate as generate_with_gptimage
-from settings import llm_choice_text, llm_temperature_param_error, outfit_style_to_prompt_hint, style_reference_filename
+from settings import (
+    llm_choice_text,
+    llm_temperature_param_error,
+    load_schedule_forbidden_keywords,
+    outfit_style_to_prompt_hint,
+    sanitize_schedule_forbidden_detail,
+    sanitize_schedule_forbidden_text,
+    schedule_forbidden_negative_clause,
+    style_reference_filename,
+)
 
 # Gemini image generation always uses the CPA Base URL config.
 _GEMINI_CPA_MODEL = get_image_model("gemini_model", "gemini-3.1-flash-image")
@@ -324,6 +334,23 @@ def _generate_with_gemini_cpa(theme: str, prompt: str):
 
 
 _SCHEDULE_PATH = SECRETARY_SCHEDULE_PATH
+
+
+def _generation_schedule_forbidden_keywords() -> list[str]:
+    try:
+        config = _GALLERY_CONFIG if isinstance(_GALLERY_CONFIG, dict) else {}
+        return load_schedule_forbidden_keywords(config, os.path.dirname(_SCHEDULE_PATH))
+    except Exception as e:
+        print(f"[warn] Failed to read schedule forbidden keywords: {e}", file=sys.stderr)
+        return []
+
+
+def _apply_schedule_forbidden_prompt_guard(prompt: str, keywords: list[str]) -> str:
+    cleaned = sanitize_schedule_forbidden_text(prompt, keywords, drop_fragments=False)
+    clause = schedule_forbidden_negative_clause(keywords)
+    if clause and clause.casefold() not in cleaned.casefold():
+        cleaned = f"{cleaned.rstrip(' .')}. {clause}"
+    return cleaned
 
 # Theme → schedule period keywords
 _THEME_PERIODS = {
@@ -649,6 +676,19 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "", schedule
                 schedule_details = entry.get("schedule_details", []) if isinstance(entry.get("schedule_details"), list) else []
                 break
 
+    forbidden_keywords = _generation_schedule_forbidden_keywords()
+    if forbidden_keywords:
+        schedule = sanitize_schedule_forbidden_text(schedule, forbidden_keywords, drop_fragments=False)
+        schedule_prompt = sanitize_schedule_forbidden_text(schedule_prompt, forbidden_keywords, drop_fragments=False)
+        outfit_info = sanitize_schedule_forbidden_text(outfit_info, forbidden_keywords, drop_fragments=False)
+        outfit_kw = sanitize_schedule_forbidden_text(outfit_kw, forbidden_keywords)
+        scene_kw = sanitize_schedule_forbidden_text(scene_kw, forbidden_keywords)
+        schedule_details = [
+            sanitize_schedule_forbidden_detail(item, forbidden_keywords)
+            for item in schedule_details
+            if isinstance(item, dict)
+        ]
+
     detail_by_time = _schedule_detail_map(schedule_details)
 
     if schedule_time_override and not schedule and not schedule_detail_override:
@@ -809,6 +849,12 @@ def generate(
     prompt_final: bool = False,
     no_auto_style: bool = False,
 ):
+    forbidden_keywords = (
+        _generation_schedule_forbidden_keywords()
+        if theme in DAILY_THEMES or source in {"cron", "web"}
+        else []
+    )
+
     # If user didn't specify a hairstyle, let LLM pick one
     if prompt_override and not prompt_final and engine == "gptimage" and theme != "sexy":
         hair_keywords = {"马尾", "辫", "丸子头", "双马尾", "编发", "披肩", "散发", "盘发",
@@ -842,7 +888,6 @@ def generate(
     schedule_activity = ""
     if schedule_ctx and theme in DAILY_THEMES and not prompt_final:
         # Extract activity text for schedule-aware prompt building
-        import re
         m = re.search(r"Today's plan:\s*(.+?)(?:\.\s*(?:Time|Style):|$)", schedule_ctx)
         if m:
             schedule_activity = m.group(1).strip()
@@ -872,6 +917,16 @@ def generate(
     if not resolved_prompt:
         print(f"ERROR: prompt is empty for theme={theme}; generation aborted", file=sys.stderr)
         return None
+    if forbidden_keywords:
+        guarded_prompt = _apply_schedule_forbidden_prompt_guard(resolved_prompt, forbidden_keywords)
+        if guarded_prompt != resolved_prompt:
+            print("🚫 Applied schedule forbidden keyword guard to final prompt", file=sys.stderr)
+            resolved_prompt = guarded_prompt
+    prompt_preview = re.sub(r"\s+", " ", resolved_prompt).strip()[:260]
+    print(
+        f"🧾 Resolved prompt length: chars={len(resolved_prompt)}, bytes={len(resolved_prompt.encode('utf-8'))}, preview={prompt_preview}",
+        file=sys.stderr,
+    )
 
     # Resolve style to ref_image path (only supported by gptimage engine)
     requested_ref_image = ref_image
@@ -1012,7 +1067,7 @@ def generate(
     if path:
         from core import sync_to_gallery
         sync_to_gallery(path, os.path.basename(path), theme, actual_style,
-                        prompt=prompt_override or resolved_prompt,
+                        prompt=resolved_prompt if forbidden_keywords else (prompt_override or resolved_prompt),
                         caption=caption_text or "",
                         model_name=used_model,
                         source=source,
