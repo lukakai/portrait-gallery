@@ -409,6 +409,202 @@ def load_schedule_forbidden_keywords(config: dict, data_dir: str) -> list[str]:
     return normalize_schedule_forbidden_keywords(schedule_cfg.get("forbidden_keywords"))
 
 
+def schedule_forbidden_variants(keyword: str) -> set[str]:
+    """Return direct and common image-prompt variants for a schedule forbidden word."""
+    text = re.sub(r"\s+", " ", str(keyword or "")).strip().casefold()
+    if not text:
+        return set()
+    variants = {text}
+    if text == "包":
+        variants.update({
+            "bag",
+            "bags",
+            "handbag",
+            "hand bag",
+            "purse",
+            "tote",
+            "tote bag",
+            "backpack",
+            "back pack",
+            "crossbody",
+            "crossbody bag",
+            "cross-body bag",
+            "shoulder bag",
+            "clutch",
+            "clutch bag",
+            "satchel",
+            "messenger bag",
+            "bucket bag",
+            "saddle bag",
+            "shopping bag",
+            "paper bag",
+            "wicker basket bag",
+            "briefcase",
+            "package",
+            "packages",
+            "packing",
+            "pack",
+            "parcel",
+            "手提包",
+            "斜挎包",
+            "单肩包",
+            "双肩包",
+            "背包",
+            "托特包",
+            "链条包",
+            "草编包",
+            "小包",
+            "方包",
+            "手拿包",
+            "包包",
+            "包袋",
+            "购物袋",
+            "袋子",
+        })
+    return variants
+
+
+def _schedule_forbidden_has_variant(text: str, variants: set[str]) -> bool:
+    lower = str(text or "").casefold()
+    if not lower:
+        return False
+    for variant in variants:
+        if not variant:
+            continue
+        if re.search(r"[a-z0-9]", variant):
+            pattern = r"(?<![a-z0-9])" + re.escape(variant) + r"(?![a-z0-9])"
+            if re.search(pattern, lower):
+                return True
+            continue
+        if variant in lower:
+            return True
+    return False
+
+
+def _schedule_forbidden_all_variants(keywords: list[str]) -> set[str]:
+    variants: set[str] = set()
+    for keyword in normalize_schedule_forbidden_keywords(keywords):
+        variants.update(schedule_forbidden_variants(keyword))
+    return variants
+
+
+_BAG_EN_PHRASE_PATTERNS = (
+    r"\b(?:holding|carrying|clutching|gripping|wearing|with|holding onto|carrying around)\s+"
+    r"(?:an?\s+|the\s+|her\s+)?(?:[a-z0-9&'\-]+\s+){0,8}"
+    r"(?:bag|bags|handbag|hand bag|purse|tote|backpack|back pack|satchel|clutch|briefcase)\b"
+    r"(?:\s+(?:in|on|over|by|with|across|from|at)\s+(?:[a-z0-9&'\-]+(?:\s+|(?=[,.;:]|$))){0,10})?",
+    r"\b(?:(?:small|mini|micro|large|black|white|pink|red|blue|brown|beige|cream|silver|gold|"
+    r"pearl|chain|leather|canvas|wicker|basket|straw|square|crossbody|cross-body|shoulder|"
+    r"tote|hand|designer|luxury|structured|quilted|velvet|silk|cute|simple|delicate|elegant|"
+    r"retro|french|korean|japanese|school|bucket|saddle|hobo|messenger|shopping|paper)\s+){0,9}"
+    r"(?:bag|bags|handbag|hand bag|purse|backpack|back pack|satchel|tote|clutch|briefcase)\b",
+)
+
+_BAG_ZH_PHRASE_PATTERN = (
+    r"(?:拿着|拎着|背着|挎着|提着|抱着|佩戴|带着)?"
+    r"[^，,。.;；]{0,12}"
+    r"(?:手提包|斜挎包|单肩包|双肩包|背包|托特包|链条包|草编包|小包|方包|手拿包|包包|包袋|购物袋|袋子)"
+    r"[^，,。.;；]{0,8}"
+)
+
+
+def _schedule_forbidden_remove_list_fragments(text: str, variants: set[str]) -> str:
+    tokens = re.split(r"([,，;；])", str(text or ""))
+    pieces: list[str] = []
+    pending_delim = ""
+    for token in tokens:
+        if token in {",", "，", ";", "；"}:
+            pending_delim = token
+            continue
+        segment = token.strip()
+        if not segment:
+            continue
+        if _schedule_forbidden_has_variant(segment, variants):
+            pending_delim = ""
+            continue
+        if pieces and pending_delim:
+            pieces.append(f"{pending_delim} ")
+        elif pieces:
+            pieces.append(" ")
+        pieces.append(segment)
+        pending_delim = ""
+    return "".join(pieces)
+
+
+def _schedule_forbidden_clean_punctuation(text: str) -> str:
+    text = re.sub(r"\s+", " ", str(text or ""))
+    text = re.sub(r"\bAction:\s+while\s+([a-z][a-z0-9'\-]*ing\b)", r"Action: \1", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s+([,，.;；:：])", r"\1", text)
+    text = re.sub(r"([,，;；])\s*([,，;；.。])", r"\2", text)
+    text = re.sub(r"(?:,\s*){2,}", ", ", text)
+    text = re.sub(r"(?:，\s*){2,}", "，", text)
+    text = re.sub(r"\s+\.", ".", text)
+    text = re.sub(r"\.\s*\.", ".", text)
+    return text.strip(" ,，;；")
+
+
+def sanitize_schedule_forbidden_text(value: Any, keywords: list[str], *, drop_fragments: bool = True) -> str:
+    """Remove schedule-forbidden words and common visual synonyms from prompt text."""
+    text = re.sub(r"\s+", " ", str(value or "")).strip()
+    if not text:
+        return ""
+    normalized_keywords = normalize_schedule_forbidden_keywords(keywords)
+    if not normalized_keywords:
+        return text
+
+    variants = _schedule_forbidden_all_variants(normalized_keywords)
+    if any("包" == re.sub(r"\s+", " ", str(keyword or "")).strip() for keyword in normalized_keywords):
+        for pattern in _BAG_EN_PHRASE_PATTERNS:
+            text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+        text = re.sub(_BAG_ZH_PHRASE_PATTERN, "", text, flags=re.IGNORECASE)
+
+    if drop_fragments:
+        text = _schedule_forbidden_remove_list_fragments(text, variants)
+
+    for keyword in normalized_keywords:
+        for variant in sorted(schedule_forbidden_variants(keyword), key=len, reverse=True):
+            if not variant:
+                continue
+            if variant == "包":
+                continue
+            if re.search(r"[a-z0-9]", variant):
+                pattern = r"(?<![a-z0-9])" + re.escape(variant) + r"(?![a-z0-9])"
+                text = re.sub(pattern, "", text, flags=re.IGNORECASE)
+            else:
+                text = text.replace(variant, "")
+    return _schedule_forbidden_clean_punctuation(text)
+
+
+def sanitize_schedule_forbidden_detail(detail: Any, keywords: list[str]) -> dict:
+    """Clean a schedule_detail object before it becomes image prompt context."""
+    if not isinstance(detail, dict):
+        return {}
+    cleaned = dict(detail)
+    for field in ("activity_zh", "activity_en", "action_en", "scene_en", "outfit_en", "hair_en", "props_en", "lighting_en"):
+        if field not in cleaned:
+            continue
+        value = sanitize_schedule_forbidden_text(cleaned.get(field, ""), keywords)
+        if value:
+            cleaned[field] = value
+        else:
+            cleaned.pop(field, None)
+    return cleaned
+
+
+def schedule_forbidden_negative_clause(keywords: list[str]) -> str:
+    """Build a short hard visual exclusion for image prompts."""
+    normalized_keywords = normalize_schedule_forbidden_keywords(keywords)
+    if not normalized_keywords:
+        return ""
+    if any("包" == re.sub(r"\s+", " ", str(keyword or "")).strip() for keyword in normalized_keywords):
+        return (
+            "Hard visual exclusion: no bags, no handbags, no purses, no totes, no backpacks, "
+            "no crossbody bags, no shoulder bags, no shopping bags, no clutches, no satchels; "
+            "keep her hands, shoulders, and outfit free of any bag."
+        )
+    return "Hard visual exclusion: do not include " + ", ".join(normalized_keywords) + "."
+
+
 def config_int(config: dict, path: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
     try:
         value = int(get_nested(config, path, default))
@@ -639,7 +835,7 @@ def normalize_image_dir(value: Any, data_dir: str) -> str:
     path = Path(raw).expanduser()
     if not path.is_absolute():
         path = Path(data_dir).expanduser() / path
-    return str(path.resolve())
+    return os.path.abspath(os.path.expanduser(str(path)))
 
 
 def resolve_image_dir(config: dict, data_dir: str) -> str:

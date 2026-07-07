@@ -39,6 +39,7 @@ from settings import (
     load_config,
     load_json_file,
     load_runtime_persona,
+    load_schedule_forbidden_keywords,
     normalize_chat_url,
     outfit_style_to_base_style,
     resolve_builtin_reference_dir,
@@ -46,6 +47,7 @@ from settings import (
     resolve_data_dir,
     resolve_project_root,
     resolve_reference_dir,
+    sanitize_schedule_forbidden_text,
     theme_style_default,
 )
 
@@ -1502,13 +1504,26 @@ def sync_to_gallery(path: str, filename: str, theme: str, style: Optional[str] =
             outfit_desc = f"精心搭配的{style_name}造型"
 
     daily_context = _load_daily_schedule_context(today, schedule_time)
+    forbidden_keywords = load_schedule_forbidden_keywords(_GALLERY_CONFIG, str(_DATA_DIR))
+
+    def _safe_schedule_metadata(value: str, *, drop_fragments: bool = True) -> str:
+        if not forbidden_keywords:
+            return str(value or "").strip()
+        return sanitize_schedule_forbidden_text(value, forbidden_keywords, drop_fragments=drop_fragments)
+
+    def _stored_prompt(value: str) -> str:
+        prompt_text = re.sub(r"\s*Hard visual exclusion:.*$", "", str(value or ""), flags=re.IGNORECASE).strip()
+        return _safe_schedule_metadata(prompt_text, drop_fragments=False)
+
     schedule_time_slot = _normalize_schedule_slot_time(schedule_time)
     if daily_context.get("base_style") and not base_style:
         base_style = str(daily_context.get("base_style") or "").strip()
     if daily_context.get("outfit_style"):
         style_name = str(daily_context.get("outfit_style") or style_name).strip() or style_name
-    full_outfit = str(daily_context.get("outfit") or "").strip()
-    outfit_value = full_outfit or f"风格：{style_name} 穿搭：{outfit_desc}"
+    if forbidden_keywords:
+        outfit_desc = _safe_schedule_metadata(outfit_desc)
+    full_outfit = _safe_schedule_metadata(daily_context.get("outfit") or "", drop_fragments=False)
+    outfit_value = full_outfit or _safe_schedule_metadata(f"风格：{style_name} 穿搭：{outfit_desc}", drop_fragments=False)
     caption_value = _best_caption(caption, daily_context.get("caption"))
 
     entry = {
@@ -1521,14 +1536,14 @@ def sync_to_gallery(path: str, filename: str, theme: str, style: Optional[str] =
         "outfit": outfit_value,
         "image_path": f"/images/{filename}",
         "image_filename": filename,
-        "prompt": prompt,
+        "prompt": _stored_prompt(prompt),
         "caption": caption_value,
         "favorite": False,
         "status": "ok",
         "source": source,
         "schedule_time": schedule_time,
-        "outfit_keywords": str(daily_context.get("outfit_keywords") or "").strip(),
-        "scene_keywords": str(daily_context.get("scene_keywords") or "").strip(),
+        "outfit_keywords": _safe_schedule_metadata(daily_context.get("outfit_keywords") or ""),
+        "scene_keywords": _safe_schedule_metadata(daily_context.get("scene_keywords") or ""),
     }
     if schedule_time_slot:
         entry["time"] = schedule_time_slot

@@ -66,6 +66,7 @@ webhook:
   url: ''
 paths:
   data_dir: /Users/lukai/portrait-gallery/data
+  image_dir: /Users/lukai/portrait-gallery/data/copy_gallery_images
   reference_dir: /Users/lukai/portrait-gallery/data/references
   builtin_reference_dir: /Users/lukai/portrait-gallery/app/references
 integrations:

@@ -22,6 +22,7 @@ from settings import (
     load_enabled_outfit_styles,
     load_runtime_persona,
     load_schedule_forbidden_keywords,
+    schedule_forbidden_variants,
 )
 
 logger = logging.getLogger(__name__)
@@ -278,26 +279,7 @@ class DailyScheduler:
 
     @staticmethod
     def _schedule_forbidden_variants(keyword: str) -> set[str]:
-        text = re.sub(r"\s+", " ", str(keyword or "")).strip().casefold()
-        if not text:
-            return set()
-        variants = {text}
-        if text == "包":
-            variants.update({
-                "bag",
-                "bags",
-                "handbag",
-                "hand bag",
-                "purse",
-                "tote",
-                "tote bag",
-                "package",
-                "packages",
-                "packing",
-                "pack",
-                "parcel",
-            })
-        return variants
+        return schedule_forbidden_variants(keyword)
 
     def _schedule_forbidden_output_error(self, data: dict) -> str:
         keywords = self._schedule_forbidden_keywords()
@@ -1278,6 +1260,32 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
             return text[:limit].rstrip("，,。.!！?；;、") + "…"
         return text
 
+    @staticmethod
+    def _compose_schedule_plan_caption(parts: list[str], max_len: int = 120) -> str:
+        prefix = "今天先按这个节奏来："
+        suffix = "，别把事情都拖到最后。"
+        clean_parts = [str(part or "").strip("，,。.!！?；;、") for part in parts if str(part or "").strip()]
+        if not clean_parts:
+            return ""
+
+        caption = prefix + "，".join(clean_parts) + suffix
+        if len(caption) <= max_len:
+            return caption
+
+        selected = []
+        body_budget = max_len - len(prefix) - len(suffix)
+        used = 0
+        for part in clean_parts:
+            addition = len(part) + (1 if selected else 0)
+            if selected and used + addition > body_budget:
+                continue
+            if not selected and addition > body_budget:
+                selected.append(part[: max(4, body_budget - 1)].rstrip("，,。.!！?；;、") + "…")
+                break
+            selected.append(part)
+            used += addition
+        return prefix + "，".join(selected or clean_parts[:1]) + suffix
+
     def _build_schedule_plan_caption(self, schedule: str, character_name: str = "") -> str:
         items = self._schedule_plan_items(schedule)
         if not items:
@@ -1310,13 +1318,14 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
         if not parts:
             parts = [self._caption_activity_label(items[0][1], 24)]
 
-        caption = "今天先按这个节奏来：" + "，".join(parts) + "，别把事情都拖到最后。"
-        return caption[:90].rstrip("，,。.!！?；;、") + "。"
+        return self._compose_schedule_plan_caption(parts)
 
     @staticmethod
     def _caption_is_schedule_plan(caption: str) -> bool:
         text = re.sub(r"\s+", "", str(caption or ""))
         if not text:
+            return False
+        if "拖到最。" in text or "拖到最！" in text:
             return False
         bad_markers = (
             "主人", "亲一口", "抱抱", "怀里", "来找我玩", "被夸",
