@@ -254,6 +254,24 @@ class LogViewFormattingTest(unittest.TestCase):
         self.assertIn("最终图片由 Gitee 生成", message)
         self.assertIn("没有可用的 GPT Image 渠道", message)
 
+    def test_images_only_failure_is_reported_as_permanently_disabled(self):
+        raw = "GPT Image Images API failed; Chat endpoint fallback is disabled"
+
+        translated = GalleryServer._translate_log_message(
+            raw,
+            "ERROR",
+            "image_gen",
+        )
+        summary = PortraitGalleryApp._summarize_photo_failure(raw)
+
+        self.assertIn("Chat 生图通道已永久禁用", translated)
+        self.assertIn("未请求 /chat/completions", translated)
+        self.assertIn("Chat 生图通道已永久禁用", summary)
+
+        html = (APP_DIR / "web" / "index.html").read_text(encoding="utf-8")
+        self.assertIn("chat endpoint fallback is disabled", html)
+        self.assertIn("Chat 生图通道已永久禁用，未请求 /chat/completions", html)
+
     def test_metadata_model_field_populates_display_model_name(self):
         server = GalleryServer.__new__(GalleryServer)
         server._image_file_info = lambda _filename: {}

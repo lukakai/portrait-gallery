@@ -298,10 +298,15 @@ class WebServerImageFallbackSettingsTest(unittest.IsolatedAsyncioTestCase):
             str(config_path),
         )
 
-    async def test_chat_fallback_defaults_off_and_can_be_enabled(self):
+    async def test_chat_fallback_stays_disabled_and_legacy_setting_is_removed(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             root = Path(tmpdir)
             server = self._make_server(root)
+            plugin_path = root / "data" / "plugin_config.json"
+            plugin_path.write_text(
+                json.dumps({"gpt_chat_fallback_enabled": True}),
+                encoding="utf-8",
+            )
             test_server = TestServer(server.app)
             await test_server.start_server(access_log=None)
             client = TestClient(test_server)
@@ -324,9 +329,10 @@ class WebServerImageFallbackSettingsTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(200, save_response.status)
             self.assertTrue(saved.get("success"))
             self.assertEqual(200, current_response.status)
-            self.assertTrue(current.get("gpt_chat_fallback_enabled"))
-            plugin = json.loads((root / "data" / "plugin_config.json").read_text(encoding="utf-8"))
-            self.assertTrue(plugin.get("gpt_chat_fallback_enabled"))
+            self.assertFalse(current.get("gpt_chat_fallback_enabled"))
+            plugin = json.loads(plugin_path.read_text(encoding="utf-8"))
+            self.assertNotIn("gpt_chat_fallback_enabled", plugin)
+            self.assertEqual(0o600, plugin_path.stat().st_mode & 0o777)
 
 
 class WebServerReferenceUploadTest(unittest.IsolatedAsyncioTestCase):

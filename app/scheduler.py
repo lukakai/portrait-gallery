@@ -6,6 +6,7 @@ import os
 import random
 import re
 from datetime import date, timedelta
+from difflib import SequenceMatcher
 from typing import Optional
 
 from calendar_context import build_day_context
@@ -21,6 +22,7 @@ from settings import (
     load_enabled_outfit_styles,
     load_runtime_persona,
     load_schedule_forbidden_keywords,
+    normalize_runtime_character_name,
     schedule_forbidden_variants,
     service_today,
 )
@@ -324,6 +326,16 @@ DEFAULT_REQUIRED_PERIODS = [
 ]
 SCHEDULE_PHOTO_QUIET_START_MINUTE = 3 * 60
 SCHEDULE_PHOTO_QUIET_END_MINUTE = 6 * 60
+RECENT_HISTORY_DAYS = 7
+ACTIVITY_SIMILARITY_THRESHOLD = 0.82
+ACTIVITY_SIMILARITY_REPLACEMENTS = (
+    ("记录手账", ("写手帐", "写手账", "整理手帐", "整理手账", "做手帐", "做手账")),
+    ("咖啡馆", ("咖啡店", "咖啡厅")),
+    ("江边", ("沿江边", "江畔", "河边", "河畔", "滨江", "沿江")),
+    ("跑步", ("慢跑", "跑一跑")),
+    ("书店", ("书屋",)),
+    ("挑选小说", ("挑一本小说", "挑小说", "选小说", "选购小说", "选购新小说")),
+)
 
 JSON_OUTPUT_CONTRACT = """【最高优先级输出协议】
 只允许输出一个合法 JSON 对象。回复第一个字符必须是 {，最后一个字符必须是 }。
@@ -365,11 +377,36 @@ class DailyScheduler:
 
     @staticmethod
     def _activity_signature(activity: str) -> str:
+        return DailyScheduler._activity_similarity_text(activity)[:18]
+
+    @staticmethod
+    def _activity_similarity_text(activity: str) -> str:
         text = re.sub(r"\s+", "", str(activity or ""))
         text = re.sub(r"[，,。.!！?？；;、：:（）()《》“”\"'‘’]", "", text)
+        for canonical, aliases in ACTIVITY_SIMILARITY_REPLACEMENTS:
+            for alias in sorted(aliases, key=len, reverse=True):
+                text = text.replace(alias, canonical)
+        text = re.sub(r"^(?:去|到|在|沿着|沿)", "", text)
         for filler in ("今天的", "今日的", "一份", "简单的", "精致的", "舒服的", "轻松的"):
             text = text.replace(filler, "")
-        return text[:18]
+        return text
+
+    @classmethod
+    def _activities_are_similar(cls, current: str, previous: str) -> bool:
+        current_text = cls._activity_similarity_text(current)
+        previous_text = cls._activity_similarity_text(previous)
+        if not current_text or not previous_text:
+            return False
+        if current_text == previous_text:
+            return True
+        if min(len(current_text), len(previous_text)) >= 8 and (
+            current_text in previous_text or previous_text in current_text
+        ):
+            return True
+        shared_categories = cls._activity_categories(current) & cls._activity_categories(previous)
+        if len(shared_categories) >= 2:
+            return True
+        return SequenceMatcher(None, current_text, previous_text).ratio() >= ACTIVITY_SIMILARITY_THRESHOLD
 
     @classmethod
     def _activity_categories(cls, activity: str) -> set[str]:
@@ -383,7 +420,7 @@ class DailyScheduler:
     def _schedule_diversity_prompt_block(self, schedule_history: str) -> str:
         ideas = "\n".join(f"- {item}" for item in SCHEDULE_DIVERSITY_IDEAS)
         history_text = schedule_history or "（无近期日程）"
-        return f"""近 3 天日程避重参考（不要复刻这些活动组合或场景顺序）：
+        return f"""近 {RECENT_HISTORY_DAYS} 天日程避重参考（不要复刻这些活动组合或场景顺序）：
 {history_text}
 
 多样化要求：
@@ -681,7 +718,11 @@ class DailyScheduler:
             + "。请更换核心单品组合，并同步改变配色、材质或版型；只改风格名或同义说法不算新穿搭"
         )
 
-    def _recent_outfit_accessories(self, today: date, days: int = 3) -> dict[str, dict]:
+    def _recent_outfit_accessories(
+        self,
+        today: date,
+        days: int = RECENT_HISTORY_DAYS,
+    ) -> dict[str, dict]:
         all_data = self._load_schedule_data()
         recent = {}
         for i in range(1, days + 1):
@@ -704,12 +745,12 @@ class DailyScheduler:
         if not repeated:
             return ""
         return (
-            "近 3 天已出现相同配饰: "
+            f"近 {RECENT_HISTORY_DAYS} 天已出现相同配饰: "
             + "；".join(repeated[:4])
             + "。请更换配饰类别、颜色或图案，不能只换同义说法"
         )
 
-    def _get_schedule_history(self, today: date, days: int = 3) -> str:
+    def _get_schedule_history(self, today: date, days: int = RECENT_HISTORY_DAYS) -> str:
         all_data = self._load_schedule_data()
         lines = []
         for i in range(1, days + 1):
@@ -724,9 +765,14 @@ class DailyScheduler:
             lines.append(f"[{date_str}] {summary}")
         return "\n".join(lines) if lines else "（无近期日程）"
 
-    def _recent_schedule_category_counts(self, today: date, days: int = 3) -> dict[str, int]:
+    def _recent_schedule_category_counts(self, today: date, days: int = RECENT_HISTORY_DAYS) -> dict[str, int]:
         all_data = self._load_schedule_data()
-        counts = {"cooking_days": 0, "low_energy_home_days": 0, "category_days": []}
+        counts = {
+            "window_days": days,
+            "cooking_days": 0,
+            "low_energy_home_days": 0,
+            "category_days": [],
+        }
         for i in range(1, days + 1):
             date_str = (today - timedelta(days=i)).isoformat()
             entry = all_data.get(date_str)
@@ -743,14 +789,118 @@ class DailyScheduler:
                 counts["category_days"].append({"date": date_str, "categories": categories})
         return counts
 
+    def _recent_schedule_duplicate_error(
+        self,
+        today: date,
+        display_items: list[tuple[str, str]],
+        days: int = RECENT_HISTORY_DAYS,
+    ) -> str:
+        all_data = self._load_schedule_data()
+        recent_activities: list[tuple[str, str]] = []
+        for i in range(1, days + 1):
+            date_str = (today - timedelta(days=i)).isoformat()
+            entry = all_data.get(date_str)
+            if not isinstance(entry, dict) or entry.get("status") != "ok":
+                continue
+            recent_activities.extend(
+                (date_str, activity)
+                for _time_text, activity in self._schedule_plan_items(entry.get("schedule", ""))
+            )
+
+        for _time_text, activity in display_items:
+            for date_str, previous in recent_activities:
+                if self._activities_are_similar(activity, previous):
+                    return (
+                        f"活动与近 {days} 天日程重复或高度相似: {activity} "
+                        f"≈ [{date_str}] {previous}"
+                    )
+        return ""
+
+    @staticmethod
+    def _outfit_keyword_set(value: str) -> set[str]:
+        return {
+            re.sub(r"\s+", " ", item).strip(" .").casefold()
+            for item in re.split(r"[,，;；|]+", str(value or ""))
+            if re.sub(r"\s+", " ", item).strip(" .")
+        }
+
+    def _recent_outfit_duplicate_error(
+        self,
+        today: date,
+        outfit_style: str,
+        outfit_keywords: str,
+        days: int = RECENT_HISTORY_DAYS,
+        candidate_entry: Optional[dict] = None,
+    ) -> str:
+        current = self._outfit_keyword_set(outfit_keywords)
+        candidate = dict(candidate_entry or {})
+        candidate["outfit_style"] = str(outfit_style or candidate.get("outfit_style") or "").strip()
+        candidate["outfit_keywords"] = str(outfit_keywords or candidate.get("outfit_keywords") or "").strip()
+        candidate_features = self._outfit_similarity_features(candidate)
+        if len(current) < 2 and not any(candidate_features.values()):
+            return ""
+
+        all_data = self._load_schedule_data()
+        current_style = str(outfit_style or "").strip()
+        for i in range(1, days + 1):
+            date_str = (today - timedelta(days=i)).isoformat()
+            entry = self._daily_schedule_entry(all_data, date_str)
+            if not entry:
+                continue
+            previous = self._outfit_keyword_set(entry.get("outfit_keywords", ""))
+            shared = current & previous
+            same_style = current_style and current_style == str(entry.get("outfit_style") or "").strip()
+            overlap = len(shared) / max(1, min(len(current), len(previous)))
+            exact_similar = (
+                len(shared) >= 3
+                or (same_style and len(shared) >= 2)
+                or (len(shared) >= 2 and overlap >= 0.5)
+            )
+            feature_similar, score, feature_shared = self._is_disliked_outfit_similar(
+                candidate,
+                entry,
+            )
+            if exact_similar or feature_similar:
+                matched_parts = []
+                if shared:
+                    matched_parts.append("关键词 " + "、".join(sorted(shared)[:5]))
+                if feature_shared["garments"]:
+                    matched_parts.append(
+                        "单品 " + self._feature_labels(
+                            feature_shared["garments"],
+                            OUTFIT_GARMENT_LABELS,
+                        )
+                    )
+                if feature_shared["colors"]:
+                    matched_parts.append(
+                        "配色 " + self._feature_labels(
+                            feature_shared["colors"],
+                            OUTFIT_COLOR_LABELS,
+                        )
+                    )
+                if feature_shared["silhouettes"]:
+                    matched_parts.append(
+                        "版型 " + self._feature_labels(
+                            feature_shared["silhouettes"],
+                            OUTFIT_SILHOUETTE_LABELS,
+                        )
+                    )
+                detail = "；".join(matched_parts[:4]) or "核心单品与服装特征重复"
+                return (
+                    f"穿搭与近 {days} 天记录过于相似: [{date_str}] "
+                    f"相似度 {score:.0%}；{detail}"
+                )
+        return ""
+
     def _schedule_diversity_error(
         self,
         display_items: list[tuple[str, str]],
-        recent_counts: Optional[dict[str, int]] = None,
+        recent_counts: Optional[dict] = None,
     ) -> str:
         if not display_items:
             return ""
         recent_counts = recent_counts or {}
+        window_days = int(recent_counts.get("window_days") or RECENT_HISTORY_DAYS)
         first_activity = display_items[0][1]
         if self._activity_has(first_activity, BED_IDLE_TERMS):
             return "schedule 第一条是赖床/床上刷手机模板，请换成起床后的具体行动"
@@ -763,7 +913,7 @@ class DailyScheduler:
         if len(cooking_items) > 1:
             return "一天最多 1 条下厨/做饭/准备饭菜活动，当前重复: " + "；".join(cooking_items[:3])
         if cooking_items and recent_counts.get("cooking_days", 0) >= 2:
-            return "最近 3 天已有多天下厨/做饭，今天请改成外食、轻食、咖啡馆、便当或非餐饮活动"
+            return f"最近 {window_days} 天已有多天下厨/做饭，今天请改成外食、轻食、咖啡馆、便当或非餐饮活动"
 
         low_energy_items = [
             f"{time_text} {activity}"
@@ -773,7 +923,7 @@ class DailyScheduler:
         if len(low_energy_items) > 2:
             return "床/沙发/追番/发呆类低变化活动过多，请增加外出、兴趣、整理、创作或社交任务"
         if low_energy_items and recent_counts.get("low_energy_home_days", 0) >= 2:
-            return "最近 3 天已有多天是床/沙发/追番等低变化活动，今天请安排新的外出、兴趣、创作或社交内容"
+            return f"最近 {window_days} 天已有多天是床/沙发/追番等低变化活动，今天请安排新的外出、兴趣、创作或社交内容"
 
         candidate_categories = set().union(
             *(self._activity_categories(activity) for _time_text, activity in display_items)
@@ -784,7 +934,7 @@ class DailyScheduler:
             smaller = min(len(candidate_categories), len(recent_categories))
             if len(shared) >= 4 and smaller and len(shared) / smaller >= 0.55:
                 return (
-                    f"与近 3 天中的 {recent_day.get('date', '某一天')} 活动骨架过于相似: "
+                    f"与近 {window_days} 天中的 {recent_day.get('date', '某一天')} 活动骨架过于相似: "
                     + "、".join(sorted(shared))
                     + "。请更换主要地点、任务类别和活动顺序"
                 )
@@ -1150,7 +1300,7 @@ class DailyScheduler:
         sched_type = self._select_schedule_type(day_context)
         calendar_guidance = day_context.prompt_block(sched_type)
         persona = self._runtime_persona()
-        character_name = persona.get("name") or "角色"
+        character_name = normalize_runtime_character_name(persona.get("name"))
         user_name = persona.get("user_name") or "用户"
         persona_text = persona.get("persona") or f"你正在为「{character_name}」生成每日穿搭和心情记录。"
         caption_voice = persona.get("caption_voice") or "自然、亲切、贴近日常。"
@@ -1189,7 +1339,7 @@ class DailyScheduler:
 
 【历史穿搭参考（不要重复以下穿搭）】
 {history}
-- 近 3 天出现过的具体配饰禁止再次出现；颜色、图案和类别相同但换了同义说法仍算重复。
+- 近 {RECENT_HISTORY_DAYS} 天出现过的具体配饰禁止再次出现；颜色、图案和类别相同但换了同义说法仍算重复。
 - 例如“银色十字星锁骨链”改写成“银色星形项链”仍然重复，必须换颜色、换图案、换配饰类别，或取消项链。
 
 【日程避重与多样化要求】
@@ -1323,7 +1473,7 @@ JSON 格式（字段名固定，value 替换为实际内容）：
         sched_type = self._select_schedule_type(day_context)
         calendar_guidance = day_context.prompt_block(sched_type)
         persona = self._runtime_persona()
-        character_name = persona.get("name") or "角色"
+        character_name = normalize_runtime_character_name(persona.get("name"))
         user_name = persona.get("user_name") or "用户"
         caption_voice = persona.get("caption_voice") or "自然、亲切、贴近日常。"
         appearance = persona.get("appearance") or self._char.get("appearance", "")
@@ -1346,9 +1496,9 @@ JSON 格式（字段名固定，value 替换为实际内容）：
 {calendar_guidance}
 角色外貌：{str(appearance)[:700]}
 小心思口吻：{str(caption_voice)[:220]}
-近 3 天穿搭参考（服装、发型、鞋包和首饰都避免重复）：{str(history)[:1200]}
+近 {RECENT_HISTORY_DAYS} 天穿搭参考（服装、发型、鞋包和首饰都避免重复）：{str(history)[:1200]}
 具体配饰的颜色+图案+类别不能复用；同义改写仍算重复，例如银色十字星锁骨链与银色星形项链视为同一件配饰。
-近期日程避重（不要复刻）：{str(schedule_history)[:900]}
+近 {RECENT_HISTORY_DAYS} 天日程避重（不要复刻）：{str(schedule_history)[:900]}
 历史生图词云（低权重软参考）：{self._schedule_keyword_cloud_prompt_block(limit=2, selection_key=today.isoformat())[:700]}
 收藏偏好（只参考穿搭/发型气质）：{self._favorite_outfit_context(limit=2)[:700]}
 禁止复现的不喜欢穿搭（硬约束）：{disliked_outfits[:1800]}
@@ -1407,7 +1557,7 @@ JSON 格式（字段名固定，value 替换为实际内容）：
         sched_type = self._select_schedule_type(day_context)
         calendar_guidance = day_context.prompt_block(sched_type)
         persona = self._runtime_persona()
-        character_name = persona.get("name") or "角色"
+        character_name = normalize_runtime_character_name(persona.get("name"))
         appearance = persona.get("appearance") or self._char.get("appearance", "")
         if not appearance:
             appearance = self._read_config_key("character_appearance")
@@ -1425,10 +1575,10 @@ JSON 格式（字段名固定，value 替换为实际内容）：
 {calendar_guidance}
 外貌约束：{str(appearance)[:320]}
 禁词约束：{self._schedule_forbidden_prompt_block()}
-近 3 天穿搭避重：{str(outfit_history)[:800]}
-配饰的颜色+图案+类别不得与近 3 天相同，同义改写也算重复。
+近 {RECENT_HISTORY_DAYS} 天穿搭避重：{str(outfit_history)[:800]}
+配饰的颜色+图案+类别不得与近 {RECENT_HISTORY_DAYS} 天相同，同义改写也算重复。
 禁止复现的不喜欢穿搭：{disliked_outfits[:1200]}
-近期日程避重：{str(schedule_history)[:500]}
+近 {RECENT_HISTORY_DAYS} 天日程避重：{str(schedule_history)[:500]}
 词云低权重软参考：{self._schedule_keyword_cloud_prompt_block(limit=1, selection_key=today.isoformat())[:500]}
 
 只输出 minified JSON，不要换成数组，不要代码块。
@@ -1872,7 +2022,7 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
     def _build_schedule_plan_caption(self, schedule: str, character_name: str = "") -> str:
         items = self._schedule_plan_items(schedule)
         if not items:
-            name = character_name or "她"
+            name = normalize_runtime_character_name(character_name, fallback="雪枫") if character_name else "雪枫"
             return f"{name}今天先按手边的事来，别把安排都拖到晚上，累了就给自己留点休息时间。"
 
         buckets = {"上午": [], "午后": [], "晚上": []}
@@ -1922,7 +2072,7 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
         time_markers = ("一整天", "早上", "上午", "午后", "下午", "晚上")
         return any(marker in text for marker in intent_markers) and any(marker in text for marker in time_markers)
 
-    def _get_history(self, today: date, days: int = 3) -> str:
+    def _get_history(self, today: date, days: int = RECENT_HISTORY_DAYS) -> str:
         """获取近几天的完整穿搭历史，保留鞋包和配饰信息。"""
         all_data = self._load_schedule_data()
         items = []
@@ -2173,6 +2323,24 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
             if diversity_error:
                 logger.warning("日程重复性过高 (attempt %s): %s", attempt + 1, diversity_error)
                 continue
+            recent_schedule_error = self._recent_schedule_duplicate_error(today, display_items)
+            if recent_schedule_error:
+                logger.warning("近 7 天日程重复 (attempt %s): %s", attempt + 1, recent_schedule_error)
+                continue
+            recent_outfit_error = self._recent_outfit_duplicate_error(
+                today,
+                data.get("outfit_style", ""),
+                outfit_kw,
+                candidate_entry={
+                    "outfit": outfit_display,
+                    "prompt": llm_prompt,
+                    "outfit_keywords": outfit_kw,
+                    "schedule_details": data.get("schedule_details"),
+                },
+            )
+            if recent_outfit_error:
+                logger.warning("近 7 天穿搭重复 (attempt %s): %s", attempt + 1, recent_outfit_error)
+                continue
             missing_display = self._missing_required_periods(schedule_display)
             missing_prompt = self._missing_required_periods(schedule_prompt)
             if missing_display or missing_prompt:
@@ -2194,7 +2362,8 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
             )
             if accessory_repeat_error:
                 logger.warning(
-                    "穿搭配饰触发近 3 天避重 (attempt %s): %s",
+                    "穿搭配饰触发近 %s 天避重 (attempt %s): %s",
+                    RECENT_HISTORY_DAYS,
                     attempt + 1,
                     accessory_repeat_error,
                 )
@@ -2232,7 +2401,7 @@ outfit_style, reference_query, outfit, schedule, schedule_prompt, schedule_detai
                 continue
 
             persona = self._runtime_persona()
-            character_name = persona.get("name") or "角色"
+            character_name = normalize_runtime_character_name(persona.get("name"))
             caption = (data.get("caption", "") or "").strip()
             if not self._caption_is_schedule_plan(caption):
                 caption = self._build_schedule_plan_caption(schedule_display, character_name)

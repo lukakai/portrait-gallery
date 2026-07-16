@@ -3617,7 +3617,13 @@ class PortraitGalleryApp:
         text = detail or ""
         lower = text.lower()
         reasons = []
-        chat_fallback_disabled = "chat-compatible gpt image fallback is disabled" in lower
+        chat_fallback_disabled = any(
+            marker in lower
+            for marker in (
+                "chat-compatible gpt image fallback is disabled",
+                "chat endpoint fallback is disabled",
+            )
+        )
 
         endpoint_match = re.search(r'\[(https?://[^/\]]+|[\w.-]+:\d+)\]', text)
         endpoint = endpoint_match.group(1) if endpoint_match else ""
@@ -3687,7 +3693,7 @@ class PortraitGalleryApp:
         if "gitee fallback is disabled" in lower:
             reasons.append("当时 Gitee 回退未启用，无法自动换线路")
         if chat_fallback_disabled:
-            reasons.append("当时 Chat 端点回退未启用，未改走 /chat/completions")
+            reasons.append("Chat 生图通道已永久禁用，未请求 /chat/completions")
 
         if reasons:
             unique = "；".join(dict.fromkeys(reasons))

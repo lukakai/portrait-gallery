@@ -5,13 +5,10 @@ import base64
 import io
 import json
 import os
-import re
 import sys
 import time
 from typing import Optional
-from urllib.parse import urlparse
-
-import requests
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 from core import (
     MAX_RETRIES,
@@ -28,7 +25,6 @@ from core import (
     save_image,
     send_photo,
     update_metadata,
-    CONFIG_PATH,
     _API_KEYS_CONFIG_PATH,
 )
 
@@ -61,14 +57,12 @@ IMG2IMG_MAX_SIZE = get_image_int("img2img_max_size", 512, 64)
 IMG2IMG_QUALITY = get_image_int("img2img_quality", 75, 1, 100)
 _IMAGES_API_UNSUPPORTED_BASES: set[str] = set()
 _LAST_TERMINAL_IMAGE_FAILURE = ""
+_ALLOWED_GPT_IMAGE_ROUTES = frozenset({"images/generations", "images/edits"})
+_MAX_IMAGE_DOWNLOAD_REDIRECTS = 3
 
 
 def _configured_image_base_url(url: str) -> str:
-    base = str(url or "").strip().rstrip("/")
-    for suffix in ("/chat/completions", "/images/generations", "/images/edits"):
-        if base.endswith(suffix):
-            return base[: -len(suffix)]
-    return base
+    return _normalize_gpt_images_base_url(url)
 
 
 def _normalize_gpt_image_endpoint(item: dict) -> dict:
@@ -171,42 +165,32 @@ def _get_gpt_raw_base_url() -> str:
     return _configured_image_base_url(GPTIMAGE_DIRECT_URL)
 
 
-def _get_gpt_base_url() -> str:
-    """Return the effective request URL used by the legacy chat image mode."""
-    return _normalize_gpt_chat_url(_get_gpt_raw_base_url())
-
-
-def _normalize_gpt_chat_url(url: str) -> str:
-    """Accept either a /v1 base URL or the full chat completions endpoint."""
-    base = (url or "").strip().rstrip("/")
-    if not base:
-        return ""
-    if base.endswith("/chat/completions"):
-        return base
-    for suffix in ("/images/generations", "/images/edits"):
-        if base.endswith(suffix):
-            base = base[: -len(suffix)]
-            break
-    return f"{base}/chat/completions"
-
-
 def _normalize_gpt_images_base_url(url: str) -> str:
     """Accept /v1 or a full image/chat endpoint and return the /v1 base."""
-    base = (url or "").strip().rstrip("/")
+    raw = (url or "").strip()
+    if not raw:
+        return ""
+
+    parts = urlsplit(raw)
+    path = parts.path.rstrip("/")
+    for suffix in ("/chat/completions", "/images/generations", "/images/edits"):
+        if path.endswith(suffix):
+            path = path[: -len(suffix)]
+            break
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
+
+
+def _gpt_images_endpoint(base_url: str, route: str) -> str:
+    """Build an Images API URL without allowing a configured Chat path to survive."""
+    normalized_route = str(route or "").strip().strip("/")
+    if normalized_route not in _ALLOWED_GPT_IMAGE_ROUTES:
+        raise ValueError(f"Unsupported GPT Image route: {normalized_route or '<empty>'}")
+    base = _normalize_gpt_images_base_url(base_url)
     if not base:
         return ""
-    for suffix in ("/chat/completions", "/images/generations", "/images/edits"):
-        if base.endswith(suffix):
-            return base[: -len(suffix)]
-    return base
-
-
-def _is_explicit_chat_url(url: str) -> bool:
-    return (url or "").strip().rstrip("/").endswith("/chat/completions")
-
-
-def _is_explicit_images_url(url: str) -> bool:
-    return (url or "").strip().rstrip("/").endswith(("/images/generations", "/images/edits"))
+    parts = urlsplit(base)
+    path = f"{parts.path.rstrip('/')}/{normalized_route}"
+    return urlunsplit((parts.scheme, parts.netloc, path, parts.query, ""))
 
 
 def _mark_images_api_unsupported(base_url: str):
@@ -218,16 +202,6 @@ def _mark_images_api_unsupported(base_url: str):
 def _images_api_known_unsupported(base_url: str) -> bool:
     base = _normalize_gpt_images_base_url(base_url)
     return bool(base and base in _IMAGES_API_UNSUPPORTED_BASES)
-
-
-def _gpt_chat_fallback_enabled() -> bool:
-    """Return whether Images API failures may fall back to /chat/completions."""
-    try:
-        with open(CONFIG_PATH, encoding="utf-8") as f:
-            data = json.load(f) or {}
-        return bool(data.get("gpt_chat_fallback_enabled", False))
-    except (FileNotFoundError, json.JSONDecodeError, OSError):
-        return False
 
 
 def _looks_like_images_api_unsupported(status_code: int, body: str) -> bool:
@@ -314,9 +288,23 @@ def _image_response_bytes(data: dict) -> Optional[bytes]:
     if isinstance(url, str) and url.startswith("data:image/"):
         return base64.b64decode(url.split(",", 1)[1])
     if isinstance(url, str) and url.startswith(("http://", "https://")):
-        resp = REQUEST_SESSION.get(url, timeout=60)
-        resp.raise_for_status()
-        return resp.content
+        download_url = url
+        for _redirect_count in range(_MAX_IMAGE_DOWNLOAD_REDIRECTS + 1):
+            path = urlsplit(download_url).path.lower().rstrip("/")
+            if path.endswith("/chat/completions") or "/chat/completions/" in path:
+                raise RuntimeError("GPT Image download through Chat endpoint is disabled")
+
+            resp = REQUEST_SESSION.get(download_url, timeout=60, allow_redirects=False)
+            if int(getattr(resp, "status_code", 0) or 0) not in {301, 302, 303, 307, 308}:
+                resp.raise_for_status()
+                return resp.content
+
+            location = str(getattr(resp, "headers", {}).get("Location", "") or "").strip()
+            next_url = urljoin(download_url, location)
+            if not location or urlsplit(next_url).scheme not in {"http", "https"}:
+                raise RuntimeError("GPT Image returned an invalid image download redirect")
+            download_url = next_url
+        raise RuntimeError("GPT Image image download exceeded redirect limit")
     return None
 
 
@@ -354,7 +342,7 @@ def _image_bytes_for_edit(image_path: str, max_size: int = IMG2IMG_MAX_SIZE) -> 
 
 
 def _gpt_endpoint_label(url: str = "") -> str:
-    parsed = urlparse(url or _get_gpt_raw_base_url() or _get_gpt_base_url())
+    parsed = urlparse(url or _get_gpt_raw_base_url())
     return parsed.netloc or (url or "GPT Image")
 
 
@@ -413,7 +401,8 @@ def _generate_via_images_api(
         return None
 
     agnes_img2img = bool(ref_image and _is_agnes_model(GPTIMAGE_DIRECT_MODEL))
-    endpoint = f"{images_base}/images/generations" if (not ref_image or agnes_img2img) else f"{images_base}/images/edits"
+    route = "images/generations" if (not ref_image or agnes_img2img) else "images/edits"
+    endpoint = _gpt_images_endpoint(images_base, route)
     endpoint_label = _gpt_endpoint_label(endpoint)
     headers = _gpt_headers()
     timeout = IMG2IMG_TIMEOUT if ref_image else TEXT2IMG_TIMEOUT
@@ -442,6 +431,7 @@ def _generate_via_images_api(
                     headers={**headers, "Content-Type": "application/json"},
                     json=payload,
                     timeout=timeout,
+                    allow_redirects=False,
                 )
             elif ref_image:
                 image_bytes = _image_bytes_for_edit(ref_image)
@@ -458,6 +448,7 @@ def _generate_via_images_api(
                     data=data,
                     files={"image": ("reference.png", image_bytes, "image/png")},
                     timeout=timeout,
+                    allow_redirects=False,
                 )
             else:
                 payload = {
@@ -472,6 +463,7 @@ def _generate_via_images_api(
                     headers={**headers, "Content-Type": "application/json"},
                     json=payload,
                     timeout=timeout,
+                    allow_redirects=False,
                 )
 
             if resp.status_code != 200:
@@ -520,128 +512,6 @@ def _generate_via_images_api(
             return None
 
 
-def _generate_via_chat_gpt(
-    prompt: str,
-    ref_image: Optional[str] = None,
-    size: Optional[str] = None,
-    precise_edit: bool = False,
-) -> Optional[tuple]:
-    """Call the legacy chat-compatible GPT Image endpoint."""
-    base_url = _get_gpt_base_url()
-    if not base_url:
-        print("ERROR: image_gen.gpt_base_url is required", file=sys.stderr)
-        return None
-
-    if not GPTIMAGE_DIRECT_MODEL:
-        print("ERROR: image_gen.gpt_model is required", file=sys.stderr)
-        return None
-
-    headers = _gpt_headers(content_type=True)
-
-    if ref_image:
-        try:
-            compressed_img = _compress_image_for_img2img(ref_image)
-            face_instruction = _reference_edit_instruction(ref_image, precise_edit=precise_edit)
-            content = [
-                {"type": "image_url", "image_url": {"url": compressed_img}},
-                {"type": "text", "text": prompt + face_instruction},
-            ]
-        except Exception as e:
-            print(f"Failed to compress reference image: {e}", file=sys.stderr)
-            return None
-    else:
-        content = prompt
-
-    payload = {
-        "model": GPTIMAGE_DIRECT_MODEL,
-        "stream": False,
-        "messages": [{"role": "user", "content": content}],
-    }
-    if size:
-        payload["size"] = size
-
-    timeout = IMG2IMG_TIMEOUT if ref_image else TEXT2IMG_TIMEOUT
-    start = time.time()
-
-    endpoint_label = _gpt_endpoint_label(base_url)
-    for attempt in range(MAX_RETRIES):
-        try:
-            resp = REQUEST_SESSION.post(
-                base_url,
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-            )
-
-            if resp.status_code != 200:
-                terminal_reason = _set_terminal_image_failure(resp.status_code, resp.text)
-                print(
-                    f"Direct GPT API error {resp.status_code} [{endpoint_label}] "
-                    f"(attempt {attempt + 1}/{MAX_RETRIES}): {resp.text[:200]}",
-                    file=sys.stderr,
-                )
-                if terminal_reason:
-                    print(
-                        f"Direct GPT API terminal failure [{endpoint_label}]: {terminal_reason}",
-                        file=sys.stderr,
-                    )
-                    return None
-                if resp.status_code in RETRYABLE_STATUS and attempt < MAX_RETRIES - 1:
-                    time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                    continue
-                return None
-
-            data = resp.json()
-            msg = data["choices"][0]["message"]
-
-            images = msg.get("images", [])
-            if images and isinstance(images, list):
-                img_url = images[0].get("image_url", {}).get("url", "")
-                if img_url.startswith("data:image/"):
-                    img_data = base64.b64decode(img_url.split(",", 1)[1])
-                else:
-                    print(
-                        f"Direct GPT API: unexpected image_url format "
-                        f"(attempt {attempt + 1}/{MAX_RETRIES}): {str(img_url)[:100]}",
-                        file=sys.stderr,
-                    )
-                    if attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                        continue
-                    return None
-            else:
-                response_content = msg.get("content", "") or ""
-                b64_match = re.search(r'!\[[^\]]*\]\(data:image/[^;]+;base64,([^)]+)\)', response_content)
-                if not b64_match:
-                    terminal_reason = _set_terminal_image_failure(resp.status_code, response_content)
-                    print(
-                        f"Direct GPT API: no base64 image in response "
-                        f"(attempt {attempt + 1}/{MAX_RETRIES}): {response_content[:300]}",
-                        file=sys.stderr,
-                    )
-                    if terminal_reason:
-                        print(
-                            f"Direct GPT API terminal failure [{endpoint_label}]: {terminal_reason}",
-                            file=sys.stderr,
-                        )
-                        return None
-                    if attempt < MAX_RETRIES - 1:
-                        time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                        continue
-                    return None
-                img_data = base64.b64decode(b64_match.group(1))
-            elapsed = round(time.time() - start, 2)
-
-            return img_data, elapsed
-
-        except Exception as e:
-            print(f"Direct GPT API failed [{endpoint_label}] (attempt {attempt + 1}/{MAX_RETRIES}): {e}", file=sys.stderr)
-            if attempt < MAX_RETRIES - 1:
-                time.sleep(RETRY_DELAY_SECONDS * (attempt + 1))
-                continue
-            return None
-
-
 def _generate_via_direct_gpt(
     prompt: str,
     ref_image: Optional[str] = None,
@@ -666,50 +536,23 @@ def _generate_via_direct_gpt(
         print("ERROR: image_gen.gpt_model is required", file=sys.stderr)
         return None
 
+    result = _generate_via_images_api(
+        prompt,
+        ref_image,
+        size,
+        raw_base_url,
+        precise_edit=precise_edit,
+    )
+    if result:
+        return result
+
     engine_label = _image_engine_label()
-    is_agnes = _is_agnes_model(GPTIMAGE_DIRECT_MODEL)
-    if _is_explicit_chat_url(raw_base_url):
-        if precise_edit:
-            return _generate_via_chat_gpt(prompt, ref_image, size, precise_edit=True)
-        return _generate_via_chat_gpt(prompt, ref_image, size)
-
-    images_api_unsupported = _images_api_known_unsupported(raw_base_url)
-    if not images_api_unsupported:
-        result = _generate_via_images_api(
-            prompt,
-            ref_image,
-            size,
-            raw_base_url,
-            precise_edit=precise_edit,
-        )
-        if result or _is_explicit_images_url(raw_base_url):
-            return result
-        if _LAST_TERMINAL_IMAGE_FAILURE:
-            return None
-        images_api_unsupported = _images_api_known_unsupported(raw_base_url)
-
-    reason = "unsupported" if images_api_unsupported else "failed"
-    if is_agnes:
-        print(
-            f"{engine_label} Images API {reason}; not retrying chat-compatible GPT Image endpoint",
-            file=sys.stderr,
-        )
-        return None
-
-    if not _gpt_chat_fallback_enabled():
-        print(
-            f"Images API {reason}; chat-compatible GPT Image fallback is disabled",
-            file=sys.stderr,
-        )
-        return None
-
-    if images_api_unsupported:
-        print("Images API unsupported; using chat-compatible GPT Image endpoint", file=sys.stderr)
-    else:
-        print("Images API failed; retrying chat-compatible GPT Image endpoint", file=sys.stderr)
-    if precise_edit:
-        return _generate_via_chat_gpt(prompt, ref_image, size, precise_edit=True)
-    return _generate_via_chat_gpt(prompt, ref_image, size)
+    reason = "unsupported" if _images_api_known_unsupported(raw_base_url) else "failed"
+    print(
+        f"{engine_label} Images API {reason}; Chat endpoint fallback is disabled",
+        file=sys.stderr,
+    )
+    return None
 
 
 def generate(theme: str, send: bool = False, caption: bool = False,

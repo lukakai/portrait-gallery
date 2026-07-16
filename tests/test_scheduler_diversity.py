@@ -82,6 +82,179 @@ class ScheduleDiversityTest(unittest.TestCase):
 
             self.assertIn("最近 3 天", error)
 
+    def test_default_schedule_history_window_is_seven_days(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            schedule_data = {
+                "2026-07-01": {"status": "ok", "schedule": "08:12 八天前的活动"},
+                "2026-07-02": {"status": "ok", "schedule": "08:12 七天前的活动"},
+            }
+            Path(tmpdir, "schedule_data.json").write_text(
+                json.dumps(schedule_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            scheduler = self.make_scheduler(tmpdir)
+
+            history = scheduler._get_schedule_history(date(2026, 7, 9))
+
+            self.assertIn("七天前的活动", history)
+            self.assertNotIn("八天前的活动", history)
+
+    def test_rejects_similar_activity_from_last_seven_days(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            schedule_data = {
+                "2026-07-04": {
+                    "status": "ok",
+                    "schedule": "18:20 沿着江边步道慢慢散步吹晚风",
+                },
+            }
+            Path(tmpdir, "schedule_data.json").write_text(
+                json.dumps(schedule_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            scheduler = self.make_scheduler(tmpdir)
+
+            error = scheduler._recent_schedule_duplicate_error(
+                date(2026, 7, 9),
+                [("18:32", "沿江边步道散步吹吹晚风")],
+            )
+
+            self.assertIn("重复或高度相似", error)
+
+    def test_activity_similarity_normalizes_common_synonyms(self):
+        pairs = (
+            ("去咖啡店写手帐", "到咖啡馆整理手账"),
+            ("沿江边慢跑", "去江畔跑步"),
+            ("在书店挑一本小说", "去书屋选购新小说"),
+        )
+
+        for current, previous in pairs:
+            with self.subTest(current=current, previous=previous):
+                self.assertTrue(
+                    DailyScheduler._activities_are_similar(current, previous)
+                )
+
+    def test_rejects_synonymous_activity_from_six_days_ago(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            schedule_data = {
+                "2026-07-10": {
+                    "status": "ok",
+                    "schedule": "15:20 去咖啡店写手帐",
+                },
+            }
+            Path(tmpdir, "schedule_data.json").write_text(
+                json.dumps(schedule_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            scheduler = self.make_scheduler(tmpdir)
+
+            error = scheduler._recent_schedule_duplicate_error(
+                date(2026, 7, 16),
+                [("15:30", "到咖啡馆整理手账")],
+            )
+
+            self.assertIn("重复或高度相似", error)
+
+    def test_allows_synonymous_activity_older_than_seven_days(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            schedule_data = {
+                "2026-07-08": {
+                    "status": "ok",
+                    "schedule": "15:20 去咖啡店写手帐",
+                },
+            }
+            Path(tmpdir, "schedule_data.json").write_text(
+                json.dumps(schedule_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            scheduler = self.make_scheduler(tmpdir)
+
+            error = scheduler._recent_schedule_duplicate_error(
+                date(2026, 7, 16),
+                [("15:30", "到咖啡馆整理手账")],
+            )
+
+            self.assertEqual("", error)
+
+    def test_rejects_outfit_with_multiple_recent_shared_items(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            schedule_data = {
+                "2026-07-04": {
+                    "status": "ok",
+                    "outfit_style": "清新风",
+                    "outfit_keywords": "yellow cardigan, white camisole, pleated skirt, mary jane shoes",
+                },
+            }
+            Path(tmpdir, "schedule_data.json").write_text(
+                json.dumps(schedule_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            scheduler = self.make_scheduler(tmpdir)
+
+            error = scheduler._recent_outfit_duplicate_error(
+                date(2026, 7, 9),
+                "清新风",
+                "yellow cardigan, white camisole, pleated skirt, ankle socks",
+            )
+
+            self.assertIn("穿搭与近 7 天记录过于相似", error)
+
+    def test_rejects_synonym_rewrite_from_six_days_ago(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            schedule_data = {
+                "2026-07-10": {
+                    "status": "ok",
+                    "outfit_keywords": (
+                        "white blouse, navy pleated skirt, black loafers, "
+                        "red ribbon, ankle socks"
+                    ),
+                },
+            }
+            Path(tmpdir, "schedule_data.json").write_text(
+                json.dumps(schedule_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            scheduler = self.make_scheduler(tmpdir)
+
+            error = scheduler._recent_outfit_duplicate_error(
+                date(2026, 7, 16),
+                "",
+                (
+                    "ivory button-up shirt, blue pleated mini skirt, "
+                    "dark loafer shoes, burgundy bow, white socks"
+                ),
+            )
+
+            self.assertIn("穿搭与近 7 天记录过于相似", error)
+            self.assertIn("相似度", error)
+
+    def test_allows_synonym_rewrite_older_than_seven_days(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            schedule_data = {
+                "2026-07-08": {
+                    "status": "ok",
+                    "outfit_keywords": (
+                        "white blouse, navy pleated skirt, black loafers, "
+                        "red ribbon, ankle socks"
+                    ),
+                },
+            }
+            Path(tmpdir, "schedule_data.json").write_text(
+                json.dumps(schedule_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+            scheduler = self.make_scheduler(tmpdir)
+
+            error = scheduler._recent_outfit_duplicate_error(
+                date(2026, 7, 16),
+                "",
+                (
+                    "ivory button-up shirt, blue pleated mini skirt, "
+                    "dark loafer shoes, burgundy bow, white socks"
+                ),
+            )
+
+            self.assertEqual("", error)
+
     def test_rejects_a_recently_repeated_activity_skeleton(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             schedule_data = {
@@ -130,10 +303,10 @@ class ScheduleDiversityTest(unittest.TestCase):
                         "颈间佩戴一条银色十字星锁骨链"
                     ),
                 },
-                "2026-07-02": {
+                "2026-06-28": {
                     "status": "ok",
                     "outfit_style": "复古风",
-                    "outfit": "风格：复古风\n穿搭：这条记录在三天窗口之外",
+                    "outfit": "风格：复古风\n穿搭：这条记录在七天窗口之外",
                 },
             }
             Path(tmpdir, "schedule_data.json").write_text(
@@ -146,12 +319,12 @@ class ScheduleDiversityTest(unittest.TestCase):
 
             self.assertIn("银色十字星锁骨链", history)
             self.assertIn("银色星形项链", history)
-            self.assertNotIn("2026-07-02", history)
+            self.assertNotIn("2026-06-28", history)
 
     def test_rejects_recent_accessory_with_synonymous_wording(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             schedule_data = {
-                "2026-07-05": {
+                "2026-07-01": {
                     "status": "ok",
                     "outfit": (
                         "风格：清新风\n"
@@ -173,7 +346,7 @@ class ScheduleDiversityTest(unittest.TestCase):
             error = scheduler._outfit_accessory_repeat_error(candidate, recent)
 
             self.assertIn("银色星形项链", error)
-            self.assertIn("2026-07-05", error)
+            self.assertIn("2026-07-01", error)
 
     def test_accepts_a_different_recent_accessory(self):
         with tempfile.TemporaryDirectory() as tmpdir:

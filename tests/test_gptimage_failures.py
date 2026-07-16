@@ -100,7 +100,7 @@ class GptImageFailureTest(unittest.TestCase):
                     generate_gptimage._terminal_image_failure_reason(429, body),
                 )
 
-    def test_chat_endpoint_fallback_is_disabled_by_default(self):
+    def test_images_failure_never_falls_back_to_chat(self):
         with patch.object(
             generate_gptimage,
             "_get_gpt_raw_base_url",
@@ -113,51 +113,25 @@ class GptImageFailureTest(unittest.TestCase):
             generate_gptimage,
             "_generate_via_images_api",
             return_value=None,
-        ) as images_api, patch.object(
-            generate_gptimage,
-            "_gpt_chat_fallback_enabled",
-            return_value=False,
-        ), patch.object(
-            generate_gptimage,
-            "_generate_via_chat_gpt",
-            return_value=(b"image", 1.0),
-        ) as chat_api:
+        ) as images_api, patch.object(generate_gptimage.REQUEST_SESSION, "post") as post:
             result = generate_gptimage._generate_via_direct_gpt("portrait")
 
         self.assertIsNone(result)
-        images_api.assert_called_once()
-        chat_api.assert_not_called()
+        images_api.assert_called_once_with(
+            "portrait",
+            None,
+            None,
+            "http://example.test/v1",
+            precise_edit=False,
+        )
+        post.assert_not_called()
 
-    def test_chat_endpoint_fallback_runs_only_when_enabled(self):
-        expected = (b"image", 1.0)
-        with patch.object(
-            generate_gptimage,
-            "_get_gpt_raw_base_url",
-            return_value="http://example.test/v1",
-        ), patch.object(
-            generate_gptimage,
-            "GPTIMAGE_DIRECT_MODEL",
-            "gpt-image-2",
-        ), patch.object(
-            generate_gptimage,
-            "_generate_via_images_api",
-            return_value=None,
-        ), patch.object(
-            generate_gptimage,
-            "_gpt_chat_fallback_enabled",
-            return_value=True,
-        ), patch.object(
-            generate_gptimage,
-            "_generate_via_chat_gpt",
-            return_value=expected,
-        ) as chat_api:
-            result = generate_gptimage._generate_via_direct_gpt("portrait")
+    def test_chat_fallback_hooks_are_removed(self):
+        self.assertFalse(hasattr(generate_gptimage, "_gpt_chat_fallback_enabled"))
+        self.assertFalse(hasattr(generate_gptimage, "_generate_via_chat_gpt"))
 
-        self.assertEqual(expected, result)
-        chat_api.assert_called_once_with("portrait", None, None)
-
-    def test_explicit_chat_endpoint_does_not_require_fallback_switch(self):
-        expected = (b"image", 1.0)
+    def test_explicit_chat_endpoint_is_rewritten_to_images(self):
+        response = SimpleNamespace(status_code=400, text="bad request")
         with patch.object(
             generate_gptimage,
             "_get_gpt_raw_base_url",
@@ -167,22 +141,19 @@ class GptImageFailureTest(unittest.TestCase):
             "GPTIMAGE_DIRECT_MODEL",
             "gpt-image-2",
         ), patch.object(
-            generate_gptimage,
-            "_generate_via_images_api",
-        ) as images_api, patch.object(
-            generate_gptimage,
-            "_gpt_chat_fallback_enabled",
-            return_value=False,
-        ), patch.object(
-            generate_gptimage,
-            "_generate_via_chat_gpt",
-            return_value=expected,
-        ) as chat_api:
+            generate_gptimage.REQUEST_SESSION,
+            "post",
+            return_value=response,
+        ) as post:
             result = generate_gptimage._generate_via_direct_gpt("portrait")
 
-        self.assertEqual(expected, result)
-        images_api.assert_not_called()
-        chat_api.assert_called_once_with("portrait", None, None)
+        self.assertIsNone(result)
+        post.assert_called_once()
+        self.assertEqual(
+            "http://example.test/v1/images/generations",
+            post.call_args.args[0],
+        )
+        self.assertIs(post.call_args.kwargs["allow_redirects"], False)
 
 
 if __name__ == "__main__":

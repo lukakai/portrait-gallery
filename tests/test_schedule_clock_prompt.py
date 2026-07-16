@@ -1,3 +1,4 @@
+import json
 import re
 import sys
 import unittest
@@ -18,6 +19,23 @@ from generate import _apply_schedule_clock_render_guard, _schedule_time_constrai
 
 
 class ScheduleClockPromptTest(unittest.TestCase):
+    def test_generate_now_extra_hint_reaches_the_detail_prompt(self):
+        detail = unified_generate._clean_schedule_detail_override(
+            json.dumps(
+                {
+                    "activity_en": "reading a bedtime novel by the window",
+                    "scene_en": "quiet bedroom window seat",
+                    "extra_hint": "盖好薄毯",
+                },
+                ensure_ascii=False,
+            )
+        )
+
+        prompt = unified_generate._schedule_detail_text(detail)
+
+        self.assertIn("Activity: reading a bedtime novel by the window", prompt)
+        self.assertIn("Additional user instruction: 盖好薄毯", prompt)
+
     def test_time_constraint_uses_period_without_exposing_clock_digits(self):
         constraint = _schedule_time_constraint("09:24 去便利店买气泡水")
 

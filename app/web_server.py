@@ -1360,9 +1360,13 @@ class GalleryServer:
         if text.startswith("Agnes Images API unsupported; not retrying chat-compatible GPT Image endpoint"):
             return "当前中转不支持 Agnes 图片接口，已停止，不再改走 GPT 聊天兼容端点。"
         if text.startswith("Images API failed; chat-compatible GPT Image fallback is disabled"):
-            return "图片接口失败，Chat 端点回退未开启，已停止继续换线路。"
+            return "图片接口失败；Chat 生图通道已永久禁用，已停止继续换线路。"
         if text.startswith("Images API unsupported; chat-compatible GPT Image fallback is disabled"):
-            return "当前中转不支持 Images API，Chat 端点回退未开启，未改走 /chat/completions。"
+            return "当前中转不支持 Images API；Chat 生图通道已永久禁用，未请求 /chat/completions。"
+        if re.match(r"^.+ Images API failed; Chat endpoint fallback is disabled", text):
+            return "图片接口失败；Chat 生图通道已永久禁用，未请求 /chat/completions。"
+        if re.match(r"^.+ Images API unsupported; Chat endpoint fallback is disabled", text):
+            return "当前中转不支持 Images API；Chat 生图通道已永久禁用，未请求 /chat/completions。"
         if text.startswith("Images API failed; retrying chat-compatible GPT Image endpoint"):
             return "图片接口失败，正在改用聊天兼容 GPT Image 端点重试。"
         if (
@@ -2458,6 +2462,11 @@ class GalleryServer:
         prompt_parts.append("High detail fashion catalog lighting, realistic textiles and hair fibers, sharp edges, centered composition, generous margins around the outfit and wig.")
         return " ".join(part.strip() for part in prompt_parts if part).strip()
 
+    def _wardrobe_seed_reference_path(self) -> str:
+        """Small neutral rack image used to keep wardrobe generation on img2img."""
+        seed_path = os.path.join(self.wardrobe_reference_dir, "_wardrobe_seed_reference.png")
+        return seed_path if os.path.isfile(seed_path) else ""
+
     def _set_favorite_outfit_wardrobe_status(self, outfit_id: str, status: str, message: str = "", error: str = ""):
         outfit_id = str(outfit_id or "").strip()
         status = str(status or "").strip()
@@ -2540,6 +2549,15 @@ class GalleryServer:
                     return self._favorite_outfit_wardrobe_payload(item)
 
                 self._set_favorite_outfit_wardrobe_status(outfit_id, "generating", "衣架图生成中")
+                seed_ref_image = self._wardrobe_seed_reference_path()
+                if not seed_ref_image:
+                    self._set_favorite_outfit_wardrobe_status(
+                        outfit_id,
+                        "failed",
+                        "衣架图生成失败：缺少衣架参考底图",
+                        "wardrobe_seed_reference_missing",
+                    )
+                    raise RuntimeError("wardrobe_seed_reference_missing")
                 loop = asyncio.get_running_loop()
                 result = await loop.run_in_executor(
                     None,
@@ -2547,6 +2565,7 @@ class GalleryServer:
                         "gptimage",
                         prompt,
                         size=size,
+                        ref_image=seed_ref_image,
                         output_dir=self.wardrobe_reference_dir,
                         url_prefix="/local-refs/wardrobe",
                         source="wardrobe",
@@ -2558,7 +2577,13 @@ class GalleryServer:
                 )
 
                 if not result or not result.get("filename") or not result.get("path"):
-                    self._set_favorite_outfit_wardrobe_status(outfit_id, "failed", "衣架图生成失败", "generate_failed")
+                    self._set_favorite_outfit_wardrobe_status(outfit_id, "failed", "衣架图生成失败：GPT Image 没有返回图片", "generate_failed")
+                    logger.error(
+                        "Wardrobe image generation returned no image: outfit_id=%s size=%s ref_image=%s",
+                        outfit_id,
+                        size,
+                        seed_ref_image,
+                    )
                     raise RuntimeError("generate_failed")
 
                 wardrobe_payload = {
@@ -2568,7 +2593,9 @@ class GalleryServer:
                     "size": size,
                     "source": result.get("source") or "wardrobe",
                     "model_name": result.get("model_name") or "",
-                    "generation_mode": "text2img",
+                    "generation_mode": "img2img",
+                    "ref_image": os.path.basename(seed_ref_image),
+                    "ref_image_path": seed_ref_image,
                     "created_at": int(time.time()),
                     "file_size_bytes": int(result.get("file_size_bytes") or 0),
                     "width": int(result.get("width") or 0),
@@ -3702,7 +3729,9 @@ class GalleryServer:
                     suffix=".tmp",
                 )
                 try:
-                    if os.path.exists(path):
+                    if os.path.basename(path) in {"api_keys_config.json", "plugin_config.json"}:
+                        os.fchmod(fd, 0o600)
+                    elif os.path.exists(path):
                         os.fchmod(fd, os.stat(path).st_mode & 0o777)
                     with os.fdopen(fd, "w", encoding="utf-8") as file_obj:
                         file_obj.write(content)
@@ -4040,6 +4069,8 @@ class GalleryServer:
         plugin_config = {}
         gitee_key = ""
         gitee_fallback_enabled = False
+        # GPT Image is Images-only. Keep this response field for older clients,
+        # but never allow persisted legacy settings to re-enable Chat routing.
         gpt_chat_fallback_enabled = False
         if os.path.exists(plugin_config_path):
             try:
@@ -4049,9 +4080,6 @@ class GalleryServer:
                     if gitee_keys:
                         gitee_key = gitee_keys[0]
                     gitee_fallback_enabled = bool(plugin_config.get("gitee_fallback_enabled", False))
-                    gpt_chat_fallback_enabled = bool(
-                        plugin_config.get("gpt_chat_fallback_enabled", False)
-                    )
             except Exception as e:
                 logger.error(f"Load plugin config error: {e}")
         gitee_key = self._effective_gitee_api_key(plugin_config)
@@ -5130,10 +5158,9 @@ class GalleryServer:
                             plugin_config["gitee_fallback_enabled"] = self._body_bool(
                                 body, "gitee_fallback_enabled"
                             )
-                        if "gpt_chat_fallback_enabled" in body:
-                            plugin_config["gpt_chat_fallback_enabled"] = self._body_bool(
-                                body, "gpt_chat_fallback_enabled"
-                            )
+                        # Remove the obsolete setting even if an older client
+                        # tries to submit true. GPT Image never uses Chat.
+                        plugin_config.pop("gpt_chat_fallback_enabled", None)
 
                         if body.get("gitee_key"):
                             gitee_config = plugin_config.get("gitee_config")
@@ -9166,6 +9193,58 @@ class GalleryServer:
             detail["hair_en"] = hair_en
         return detail
 
+    def _schedule_generate_now_detail(self, now: datetime, daily: dict) -> dict:
+        """Use today's persisted schedule_details for generate-now.
+
+        The manual button sends the real clock time, which rarely equals a
+        schedule slot exactly. Pick the nearest structured schedule detail so
+        scene/outfit/hair stay aligned with the saved daily plan.
+        """
+        now_str = now.strftime("%H:%M")
+        if not isinstance(daily, dict):
+            return self._fallback_generate_now_detail(now, daily)
+
+        details = daily.get("schedule_details")
+        if not isinstance(details, list) or not details:
+            return self._fallback_generate_now_detail(now, daily)
+
+        target = now.hour * 60 + now.minute
+        best_detail = {}
+        best_time = ""
+        best_distance = 24 * 60
+        for detail in details:
+            if not isinstance(detail, dict):
+                continue
+            detail_time, _ = self._parse_time_activity(detail.get("time", ""))
+            if not detail_time:
+                continue
+            distance = abs(self._time_sort_value(detail_time) - target)
+            if distance < best_distance:
+                best_detail = detail
+                best_time = detail_time
+                best_distance = distance
+
+        if not best_detail:
+            return self._fallback_generate_now_detail(now, daily)
+
+        activity = self._clean_activity_text(
+            str(best_detail.get("activity_zh") or best_detail.get("activity") or ""),
+            max_len=72,
+        )
+        if not activity:
+            return self._fallback_generate_now_detail(now, daily)
+
+        result = {
+            "time": now_str,
+            "activity_zh": activity,
+        }
+        for field in ("activity_en", "action_en", "scene_en", "props_en", "outfit_en", "hair_en", "lighting_en"):
+            cleaned = self._clean_generate_now_en(best_detail.get(field, ""))
+            if cleaned:
+                result[field] = cleaned
+        logger.info("Generate now uses persisted schedule details: schedule_time=%s nearest_slot=%s", now_str, best_time)
+        return result
+
     @staticmethod
     def _is_generic_generate_now_detail(value: str) -> bool:
         text = re.sub(r"\s+", " ", str(value or "")).strip().lower()
@@ -9411,6 +9490,26 @@ JSON 格式：
             return "evening"
         return "bedtime"
 
+    @staticmethod
+    def _generate_now_schedule_args(
+        now_str: str,
+        now_activity: str,
+        now_detail: dict,
+    ) -> tuple[str, list[str]]:
+        """Build the CLI schedule context without losing the selected detail."""
+        schedule_time = f"{now_str} {now_activity}".strip()
+        schedule_detail_json = json.dumps(
+            now_detail,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        )
+        return schedule_time, [
+            "--schedule-time",
+            schedule_time,
+            "--schedule-detail-json",
+            schedule_detail_json,
+        ]
+
     async def handle_generate_now(self, request: web.Request):
         """根据今日日程的当前时间点生图 (💭 现在在干嘛)"""
         proc = None
@@ -9483,10 +9582,13 @@ JSON 格式：
                 now_detail = sanitize_schedule_forbidden_detail(now_detail, forbidden_keywords)
                 now_activity = self._clean_activity_text(now_detail.get("activity_zh", now_activity), max_len=96) or now_activity
                 now_detail["activity_zh"] = now_activity
-            # Pass only the clock time into generate.py. The image prompt must be
-            # built from today's persisted schedule_details, not a second LLM
-            # interpretation of the current moment.
-            schedule_time = now_str
+            # Pass the already-selected persisted detail through to generate.py
+            # so its prompt and the reference selector use the same activity.
+            schedule_time, schedule_args = self._generate_now_schedule_args(
+                now_str,
+                now_activity,
+                now_detail,
+            )
             theme = self._theme_for_schedule_time(now_str)
             base_style = str(daily.get("base_style") or "").strip().lower()
             if base_style not in {"cool", "girly", "sweet"}:
@@ -9579,8 +9681,8 @@ JSON 格式：
                 "--source", "web",
                 "--engine", engine,
                 "--size", schedule_image_size(self.config),
-                "--schedule-time", schedule_time,
             ]
+            cmd.extend(schedule_args)
             if selected_reference.get("path") and engine == "gptimage":
                 cmd.extend(["--ref-image", selected_reference["path"]])
                 logger.info(

@@ -27,6 +27,19 @@ GENERIC_APPEARANCE = (
     "polished everyday styling, clear face, expressive eyes, and a coherent personal look"
 )
 
+DEFAULT_CHARACTER_NAME = "雪枫"
+PLACEHOLDER_CHARACTER_NAMES = {
+    "角色",
+    "默认角色",
+    "画廊角色",
+    "自定义角色",
+    "可自定义角色",
+    "ai角色",
+    "ai角色名称",
+    "character",
+    "defaultcharacter",
+}
+
 DEFAULT_QUALITY_PREFIX = (
     "Candid smartphone photo, natural lighting, real skin texture with visible pores "
     "and subtle imperfections. Casual composition, slightly imperfect framing as if "
@@ -561,6 +574,28 @@ def schedule_forbidden_variants(keyword: str) -> set[str]:
             "购物袋",
             "袋子",
         })
+    if text == "银色十字星锁骨链":
+        variants.update({
+            "十字星",
+            "十字星锁骨链",
+            "十字星项链",
+            "银色十字星项链",
+            "十字星吊坠",
+            "十字星吊坠项链",
+            "银色锁骨链",
+            "silver cross-star necklace",
+            "silver cross star necklace",
+            "cross-star necklace",
+            "cross star necklace",
+            "cross-star pendant",
+            "cross star pendant",
+            "cross-star choker",
+            "cross star choker",
+            "silver collarbone chain",
+            "silver collarbone necklace",
+            "silver clavicle chain",
+            "silver clavicle necklace",
+        })
     return variants
 
 
@@ -696,13 +731,31 @@ def schedule_forbidden_negative_clause(keywords: list[str]) -> str:
     normalized_keywords = normalize_schedule_forbidden_keywords(keywords)
     if not normalized_keywords:
         return ""
-    if any("包" == re.sub(r"\s+", " ", str(keyword or "")).strip() for keyword in normalized_keywords):
-        return (
-            "Hard visual exclusion: no bags, no handbags, no purses, no totes, no backpacks, "
-            "no crossbody bags, no shoulder bags, no shopping bags, no clutches, no satchels; "
-            "keep her hands, shoulders, and outfit free of any bag."
+    clauses: list[str] = []
+    compact_keywords = {
+        re.sub(r"\s+", " ", str(keyword or "")).strip().casefold()
+        for keyword in normalized_keywords
+    }
+    if "包" in compact_keywords:
+        clauses.append(
+            "no bags, no handbags, no purses, no totes, no backpacks, no crossbody bags, "
+            "no shoulder bags, no shopping bags, no clutches, no satchels; keep her hands, "
+            "shoulders, and outfit free of any bag"
         )
-    return "Hard visual exclusion: do not include " + ", ".join(normalized_keywords) + "."
+    if "银色十字星锁骨链" in compact_keywords:
+        clauses.append(
+            "no silver collarbone chain, no silver cross-star necklace, no cross-star pendant, "
+            "and no cross-star choker; keep her neck free of this silver cross-star jewelry design"
+        )
+    remaining = [
+        keyword
+        for keyword in normalized_keywords
+        if re.sub(r"\s+", " ", str(keyword or "")).strip().casefold()
+        not in {"包", "银色十字星锁骨链"}
+    ]
+    if remaining:
+        clauses.append("do not include " + ", ".join(remaining))
+    return "Hard visual exclusion: " + "; ".join(clauses) + "."
 
 
 def config_int(config: dict, path: str, default: int, min_value: int | None = None, max_value: int | None = None) -> int:
@@ -1064,6 +1117,14 @@ def _split_persona_name(value: str) -> str:
     return text[:40].strip()
 
 
+def normalize_runtime_character_name(value: Any, fallback: str = DEFAULT_CHARACTER_NAME) -> str:
+    name = _split_persona_name(value)
+    compact = re.sub(r"\s+", "", name).lower()
+    if not compact or compact in PLACEHOLDER_CHARACTER_NAMES:
+        return fallback
+    return name
+
+
 def _short_persona_source(source: str) -> str:
     home = str(Path.home())
     return source.replace(home, "~")
@@ -1244,7 +1305,9 @@ def load_runtime_persona(config: dict, data_dir: str) -> dict:
             if resolved.get(key) or not fields.get(key):
                 continue
             value = _clean_persona_text(fields[key], 2400 if key == "persona" else 1200)
-            if key in ("name", "user_name"):
+            if key == "name":
+                value = normalize_runtime_character_name(value, fallback="")
+            elif key == "user_name":
                 value = _split_persona_name(value)
             if not value or _looks_like_prompt_dump(value):
                 continue
@@ -1273,7 +1336,7 @@ def load_runtime_persona(config: dict, data_dir: str) -> dict:
     apply(_extract_persona_fields({"character": character}, "config.character"))
 
     if not resolved["name"]:
-        resolved["name"] = "角色"
+        resolved["name"] = DEFAULT_CHARACTER_NAME
         sources["name"] = "default"
     if not resolved["user_name"]:
         resolved["user_name"] = "你"

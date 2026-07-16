@@ -276,6 +276,9 @@ curl -X POST http://localhost:18889/api/config/keys \
   }'
 ```
 
+GPT Image 只使用 `/images/generations` 和 `/images/edits`。即使旧配置仍以
+`/chat/completions` 结尾，也只会提取其 `/v1` 基址并改走 Images API，不会发送图片请求到 Chat 端点。
+
 ## 🔑 环境变量
 
 | 变量 | 说明 |
@@ -332,6 +335,10 @@ Hermes 调用 `/api/generate-custom`、`/api/hermes/text-to-image` 或 `/api/her
 - **⚙️ 设置** — Web UI 管理 API 密钥、三级 LLM 模型链、Gitee 回退、日程风格和升级选项
 
 ## 🧾 Release Notes
+
+### 未发布
+
+- GPT Image 生图彻底禁用 Chat 兼容回退；Images API 失败时直接停止，不再请求 `/chat/completions`。
 
 ### v1.3.5
 

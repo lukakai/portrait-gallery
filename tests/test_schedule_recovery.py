@@ -2,6 +2,7 @@ import asyncio
 import json
 import sys
 import unittest
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import AsyncMock, Mock
 
@@ -19,6 +20,35 @@ class DummyRequest:
 
 
 class ScheduleRecoveryTest(unittest.IsolatedAsyncioTestCase):
+    def test_generate_now_passes_the_same_persisted_detail_to_the_cli(self):
+        server = GalleryServer.__new__(GalleryServer)
+        now = datetime(2026, 7, 16, 1, 0)
+        daily = {
+            "schedule_details": [
+                {
+                    "time": "23:00",
+                    "activity_zh": "在窗边阅读睡前小说",
+                    "activity_en": "reading a bedtime novel by the window",
+                    "scene_en": "quiet bedroom window seat",
+                }
+            ]
+        }
+
+        detail = server._schedule_generate_now_detail(now, daily)
+        activity = f"{detail['activity_zh']}，盖好薄毯"
+        detail["activity_zh"] = activity
+        schedule_time, args = server._generate_now_schedule_args(
+            "01:00",
+            activity,
+            detail,
+        )
+
+        self.assertEqual("01:00 在窗边阅读睡前小说，盖好薄毯", schedule_time)
+        self.assertEqual("--schedule-time", args[0])
+        self.assertEqual(schedule_time, args[1])
+        self.assertEqual("--schedule-detail-json", args[2])
+        self.assertEqual(detail, json.loads(args[3]))
+
     async def test_app_schedule_refresh_is_singleflight_for_concurrent_callers(self):
         app = PortraitGalleryApp.__new__(PortraitGalleryApp)
         app._schedule_refresh_task = None

@@ -44,6 +44,7 @@ from settings import (
     load_runtime_persona,
     load_schedule_forbidden_keywords,
     normalize_chat_url,
+    normalize_runtime_character_name,
     outfit_style_to_base_style,
     resolve_builtin_reference_dir,
     resolve_config_path,
@@ -625,7 +626,7 @@ def _caption_repeats_schedule(caption: str, schedule_time: str = "") -> bool:
 
 
 def _personalized_caption_fallback(theme: str, persona: dict, schedule_time: str = "") -> str:
-    character = persona.get("name") or "角色"
+    character = normalize_runtime_character_name(persona.get("name"))
     user_name = persona.get("user_name") or "你"
     activity = _caption_activity(schedule_time)
     if activity:
@@ -1704,7 +1705,7 @@ def build_caption(theme: str, img_b64: Optional[str] = None, img_mime: str = "im
         else theme_hint.get(theme, "一张精心拍摄的美照")
     )
     persona = _runtime_persona()
-    character = persona.get("name") or "角色"
+    character = normalize_runtime_character_name(persona.get("name"))
     user_name = persona.get("user_name") or "用户"
     caption_voice = (
         "自然、口语、具体，像自己在心里确认当前动作；只有存在真实下一项时才安排下一步，不撒娇、不营业、不对任何人说话"

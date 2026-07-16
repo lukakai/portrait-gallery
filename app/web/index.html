@@ -1852,7 +1852,7 @@ textarea:focus-visible,
 .wardrobe-action-btn,
 .wardrobe-remove-btn {
   flex: 1 1 0;
-  min-width: 0;
+  min-width: 76px;
   min-height: 28px;
   padding: 0 5px;
   border: 1px solid rgba(233,30,99,0.2);
@@ -1888,7 +1888,9 @@ textarea:focus-visible,
   color: #7c3aed;
   font-size: 11px;
   font-weight: 800;
-  text-align: right;
+  text-align: left;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
 }
 .wardrobe-status.error { color: #b91c1c; }
 .wardrobe-edit-modal {
@@ -5040,7 +5042,7 @@ textarea:focus-visible,
   }
 }
 
-/* 🐷 日程彩蛋弹窗 */
+/* 🌸 日程彩蛋弹窗 */
 .egg-overlay { position: fixed; inset: 0; background: rgba(32,20,42,0.42); backdrop-filter: none; -webkit-backdrop-filter: none; z-index: 9999; display: flex; align-items: center; justify-content: center; opacity: 0; pointer-events: none; transition: opacity 0.18s ease; padding: 14px; box-sizing: border-box; }
 .egg-overlay.show { opacity: 1; pointer-events: auto; }
 .egg-card { background: linear-gradient(180deg, #fff, #fff9fc 78%, #fbf8ff); border: 1px solid rgba(255,255,255,0.75); border-radius: 20px; width: min(520px, calc(100vw - 28px)); min-width: 0; max-height: min(82vh, 720px); overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; box-shadow: 0 18px 46px rgba(67,42,91,0.22), 0 0 0 1px rgba(192,132,252,0.08); transform: translateY(12px); opacity: 0; transition: transform 0.18s ease, opacity 0.18s ease; contain: layout paint; }
@@ -5365,11 +5367,11 @@ textarea:focus-visible,
     <div class="auth-status" id="authStatus"></div>
   </form>
 </div>
-<!-- 🐷 日程彩蛋弹窗 -->
+<!-- 🌸 日程彩蛋弹窗 -->
 <div class="egg-overlay" id="eggOverlay">
   <div class="egg-card">
     <div class="egg-header">
-      <h2>🐷 今日日程彩蛋</h2>
+      <h2>🌸 今日日程彩蛋</h2>
       <div class="egg-date-row">
         <div class="egg-date" id="eggDate"></div>
         <button class="egg-refresh-btn" title="重新生成日程">
@@ -5482,7 +5484,7 @@ textarea:focus-visible,
 
 <div class="header">
   <div class="header-left">
-      <h1 style="user-select:none;"><span class="app-logo" id="appHeaderLogo" aria-hidden="true">🐷</span><span id="appHeaderTitle">每日穿搭画廊</span> <span class="version-tag" id="versionTag">v1.3.5</span></h1>
+      <h1 style="user-select:none;"><span class="app-logo" id="appHeaderLogo" aria-hidden="true">🌸</span><span id="appHeaderTitle">每日穿搭画廊</span> <span class="version-tag" id="versionTag">v1.3.5</span></h1>
   </div>
   <div class="tabs">
     <button class="tab has-badge" data-tab="gallery" onclick="switchTab('gallery')" ondblclick="showUnfavoriteGallery(event)"><span class="tab-label"><span class="tab-icon" aria-hidden="true">✨</span><span class="tab-text">全部</span></span><span class="tab-badge" id="badge-all">0</span></button>
@@ -5925,18 +5927,14 @@ textarea:focus-visible,
       <div class="sk-inline-status sk-gitee-status-row">
         <div class="sk-gitee-status-main">
           <div class="sk-status" id="skGptBaseUrlStatus">加载中...</div>
-          <div class="sk-status" id="skGptChatFallbackStatus">加载中...</div>
+          <div class="sk-status set" id="skGptChatFallbackStatus">✓ 仅使用 Images API</div>
         </div>
       </div>
       <div class="sk-gitee-fallback-inline" id="skGptChatFallbackRow">
         <div class="sk-gitee-fallback-copy">
-          <span class="sk-gitee-fallback-title">Chat 端点回退</span>
-          <span class="sk-gitee-fallback-hint">Images API 失败后改用 /chat/completions</span>
+          <span class="sk-gitee-fallback-title">Chat 通道已禁用</span>
+          <span class="sk-gitee-fallback-hint">生图只会请求 /images/generations 或 /images/edits</span>
         </div>
-        <label class="sk-switch" for="skGptChatFallback" aria-label="允许 Images API 失败后回退到 Chat 端点">
-          <input type="checkbox" id="skGptChatFallback" onchange="syncGptChatFallbackVisual(this.checked)">
-          <span class="sk-switch-knob"></span>
-        </label>
       </div>
     </div>
     <div class="sk-field">
@@ -6882,7 +6880,7 @@ function characterDetailVisualHtml(item) {
 }
 
 function characterDetailPlaceholderHtml() {
-  return `<div class="character-detail-placeholder"><span class="avatar" aria-hidden="true">🐷</span><span>暂无角色图</span></div>`;
+  return `<div class="character-detail-placeholder"><span class="avatar" aria-hidden="true">🌸</span><span>暂无角色图</span></div>`;
 }
 
 function openCharacterDetail(characterId) {
@@ -11356,7 +11354,6 @@ function openSettings() {
   document.getElementById("skAppearance").value = "";
   document.getElementById("skPersona").value = "";
   document.getElementById("skGiteeFallback").checked = false;
-  document.getElementById("skGptChatFallback").checked = false;
   availableLlmModels = [];
   setLlmModelChain([]);
   setPushChannel("wechat");
@@ -11480,13 +11477,13 @@ function syncGiteeFallbackVisual(enabled) {
   }
 }
 
-function syncGptChatFallbackVisual(enabled) {
+function syncGptChatFallbackVisual() {
   const row = document.getElementById("skGptChatFallbackRow");
   const status = document.getElementById("skGptChatFallbackStatus");
-  if (row) row.classList.toggle("enabled", enabled === true);
+  if (row) row.classList.remove("enabled");
   if (status) {
-    status.textContent = enabled ? "✓ Chat 回退开" : "○ Chat 回退关";
-    status.className = "sk-status " + (enabled ? "set" : "unset");
+    status.textContent = "✓ 仅使用 Images API";
+    status.className = "sk-status set";
   }
 }
 
@@ -12060,9 +12057,7 @@ async function loadSettingsStatus() {
     const giteeFallbackEl = document.getElementById("skGiteeFallback");
     giteeFallbackEl.checked = data.gitee_fallback_enabled === true;
     syncGiteeFallbackVisual(giteeFallbackEl.checked);
-    const gptChatFallbackEl = document.getElementById("skGptChatFallback");
-    gptChatFallbackEl.checked = data.gpt_chat_fallback_enabled === true;
-    syncGptChatFallbackVisual(gptChatFallbackEl.checked);
+    syncGptChatFallbackVisual();
 
     // Appearance: show as textarea content (not masked)
     const appEl = document.getElementById("skAppearance");
@@ -12543,7 +12538,6 @@ async function saveSettings() {
   const llmModel = document.getElementById("skLlmModel").value;
   const llmModels = fullLlmModelChain();
   const giteeFallbackEnabled = document.getElementById("skGiteeFallback").checked;
-  const gptChatFallbackEnabled = document.getElementById("skGptChatFallback").checked;
   const missing = [];
   requireSettingsValue("Gitee API URL", giteeUrl, missing);
   if (!giteeKey && !hasSavedSecret("gitee_key")) missing.push("Gitee API Key");
@@ -12580,7 +12574,6 @@ async function saveSettings() {
     body.hermes_cli = document.getElementById("skHermesCliPath")?.value.trim() || "";
     body.openclaw_cli = document.getElementById("skOpenclawCliPath")?.value.trim() || "";
     body.gitee_fallback_enabled = giteeFallbackEnabled;
-    body.gpt_chat_fallback_enabled = gptChatFallbackEnabled;
     // llm_model: always send; llm_models keeps the ordered fallback chain
     body.llm_model = llmModel;
     body.llm_models = llmModels;
@@ -12932,7 +12925,7 @@ document.addEventListener("keydown", e => {
   });
 })();
 
-// 🐷 日程彩蛋弹窗（左上角 logo 点击触发）
+// 🌸 日程彩蛋弹窗（左上角 logo 点击触发）
 function escapeHtml(s) { var d=document.createElement('div'); d.appendChild(document.createTextNode(s)); return d.innerHTML; }
 function escapeAttr(s) { return escapeHtml(s).replace(/"/g, '&quot;').replace(/'/g, '&#39;'); }
 function jsStringArg(s) { return escapeAttr(JSON.stringify(String(s || ""))); }
@@ -12951,7 +12944,9 @@ function summarizePhotoJobError(jobOrText) {
   }
   var lower = raw.toLowerCase();
   var reasons = [];
-  var chatFallbackDisabled = lower.includes('chat-compatible gpt image fallback is disabled');
+  var chatFallbackDisabled =
+    lower.includes('chat-compatible gpt image fallback is disabled') ||
+    lower.includes('chat endpoint fallback is disabled');
   var endpoint = '';
   var endpointMatch = raw.match(/\[(https?:\/\/[^/\]]+|[\w.-]+:\d+)\]/);
   if (endpointMatch) endpoint = endpointMatch[1];
@@ -13015,7 +13010,7 @@ function summarizePhotoJobError(jobOrText) {
     reasons.push('当时 Gitee 回退未启用，无法自动换线路');
   }
   if (chatFallbackDisabled) {
-    reasons.push('当时 Chat 端点回退未启用，未改走 /chat/completions');
+    reasons.push('Chat 生图通道已永久禁用，未请求 /chat/completions');
   }
   var summary = Array.from(new Set(reasons)).join('；');
   if (summary && !summary.includes('Gitee') && (summary.includes('连接失败') || summary.includes('响应超时'))) {

@@ -17,7 +17,7 @@ schedule:
     end: '23:59'
 llm:
   base_url: ''
-  model: gemini-3.5-flash
+  model: gemini-3.1-pro-preview-low
   fallback_model: deepseek-v4-flash
   enhance_max_tokens: 400
   enhance_temperature: 0.85
@@ -25,6 +25,9 @@ llm:
   caption_max_tokens: 90
   caption_temperature: 0.9
   caption_timeout: 30
+  models:
+  - gemini-3.1-pro-preview-low
+  - deepseek-v4-flash
 image_gen:
   script_dir: app/zhuzhu
   default_engine: gptimage
@@ -52,10 +55,10 @@ character:
   appearance: adult portrait subject with natural facial features, realistic body
     proportions, polished everyday styling, clear face, expressive eyes, and a coherent
     personal look.
-  name: 角色
-  persona: 你是一个可自定义的画廊角色，会根据用户选择的人设、外貌提示词和日程内容生成穿搭、日程与配文。
+  name: 雪枫
+  persona: 你是雪枫，会根据用户选择的人设、外貌提示词和日程内容生成穿搭、日程与配文。
 gallery:
-  title: 🖼️ 每日穿搭画廊
+  title: 雪枫的穿搭画廊
   port: 18889
   host: 0.0.0.0
 webhook:
@@ -68,7 +71,6 @@ paths:
 integrations:
   send_enabled: true
   push_channel: wechat
-  hermes_cli: ''
   wechat_target: weixin
 update:
   github_api: ''

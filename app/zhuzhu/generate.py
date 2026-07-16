@@ -608,6 +608,9 @@ def _schedule_detail_text(detail: dict) -> str:
             value = _strip_hair_color_from_schedule_hair(value)
         if value:
             parts.append(f"{label}: {value}")
+    extra_hint = re.sub(r"\s+", " ", str(detail.get("extra_hint", ""))).strip(" .")[:200]
+    if extra_hint:
+        parts.append(f"Additional user instruction: {extra_hint}")
     return ". ".join(parts)
 
 
@@ -655,10 +658,11 @@ def _clean_schedule_detail_override(raw_value: str) -> dict:
         "hair_en",
         "props_en",
         "lighting_en",
+        "extra_hint",
     ):
         value = re.sub(r"\s+", " ", str(data.get(field, ""))).strip()
         if value:
-            cleaned[field] = value
+            cleaned[field] = value[:200] if field == "extra_hint" else value
     return cleaned
 
 
@@ -745,6 +749,8 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "", schedule
             detail = schedule_detail_override if isinstance(schedule_detail_override, dict) else {}
             if not detail:
                 detail = detail_by_time.get(raw_time, {})
+            if not detail:
+                _, detail = _nearest_schedule_detail(schedule_details, raw_time, max_distance=120)
             detail = _schedule_detail_for_time(detail, raw_time)
             prompt_time, prompt_match = _find_schedule_slot(schedule_prompt, raw_slot, max_distance=0)
             display_time, display_match = _find_schedule_slot(schedule, raw_slot, max_distance=0)
@@ -767,7 +773,10 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "", schedule
             if h_match:
                 raw_time = _normalize_schedule_detail_time(raw_slot)
                 time_constraint = _schedule_time_constraint(raw_time)
-                detail = _schedule_detail_for_time(detail_by_time.get(raw_time), raw_time)
+                detail = detail_by_time.get(raw_time)
+                if not detail:
+                    _, detail = _nearest_schedule_detail(schedule_details, raw_time, max_distance=120)
+                detail = _schedule_detail_for_time(detail, raw_time)
                 best = _schedule_detail_text(detail) or _find_schedule_activity(schedule_prompt or schedule, raw_slot)
                 display_best = _find_schedule_activity(schedule, raw_slot) or best
                 if best:
@@ -852,7 +861,10 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "", schedule
         _, _, h_str, m_str, activity = min(candidates, key=lambda item: (item[0], item[1]))
         raw_time = f"{int(h_str):02d}:{int(m_str):02d}"
         time_constraint = _schedule_time_constraint(raw_time)
-        detail = _schedule_detail_for_time(detail_by_time.get(raw_time), raw_time)
+        detail = detail_by_time.get(raw_time)
+        if not detail:
+            _, detail = _nearest_schedule_detail(schedule_details, raw_time, max_distance=120)
+        detail = _schedule_detail_for_time(detail, raw_time)
         prompt_activity = _schedule_detail_text(detail) or activity
         detail_outfit_kw, detail_scene_kw, detail_hair_kw = _schedule_detail_keywords(detail, outfit_kw)
         detail_scene_kw = _append_time_constraint(detail_scene_kw, time_constraint)
