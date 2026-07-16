@@ -1,5 +1,6 @@
 """Web 画廊服务器 - aiohttp"""
 import asyncio
+import base64
 try:
     import fcntl
 except ImportError:
@@ -14,14 +15,18 @@ except ImportError:
 
     fcntl = _FcntlFallback()
 import hashlib
+import hmac
 import ipaddress
 import json
 import logging
 import os
+import random
+import secrets
 import shlex
 import shutil
 import sys
 import subprocess
+import tempfile
 from datetime import date, datetime
 from pathlib import Path
 import time
@@ -32,7 +37,7 @@ import uuid
 
 import aiohttp
 from aiohttp import web
-from PIL import Image
+from PIL import Image, ImageOps, UnidentifiedImageError
 
 from characters import (
     LOCAL_CHARACTER_SOURCE,
@@ -42,9 +47,22 @@ from characters import (
 )
 from group_chat import GroupChatStore
 from keyword_cloud import build_keyword_cloud_payload
+from image_editing import (
+    MAX_IMAGE_EDIT_INSTRUCTION_LENGTH,
+    MAX_IMAGE_EDIT_SCHEDULE_DESCRIPTION_LENGTH,
+    normalize_image_edit_instruction,
+    normalize_image_edit_schedule_description,
+    normalize_image_edit_target,
+)
+from outfit_plan_edit import (
+    MAX_OUTFIT_PLAN_EDIT_LENGTH,
+    normalize_outfit_plan_field,
+    normalize_outfit_plan_value,
+)
 from picxazz_sync import PicxazzSyncClient
 from reference_profiles import (
     analyze_reference_image,
+    ensure_reference_profiles,
     load_reference_profiles,
     reference_response as reference_profile_response,
     remove_reference_profile,
@@ -52,13 +70,15 @@ from reference_profiles import (
     select_reference_profile,
     upsert_reference_profile,
 )
-from store import ScheduleStore
+from store import ImageMetadataStore, LockedJsonDictStore, ScheduleStore
 from text_repair import repair_mojibake_text
 from settings import (
+    DEFAULT_GITEE_IMAGE_URL,
     DEFAULT_OUTFIT_STYLES,
     auto_push_agent,
     builtin_reference_map,
     build_child_env,
+    configured_timezone,
     configured_llm_models,
     configured_python,
     image_process_timeout,
@@ -77,6 +97,7 @@ from settings import (
     normalize_custom_shot_type,
     normalize_persona_source,
     normalize_push_channel,
+    normalize_runtime_config,
     sanitize_schedule_forbidden_detail,
     sanitize_schedule_forbidden_text,
     schedule_forbidden_negative_clause,
@@ -87,17 +108,26 @@ from settings import (
     resolve_project_root,
     resolve_reference_dir,
     resolve_script_dir,
+    runtime_config_path,
+    schedule_image_size,
 )
 
 logger = logging.getLogger(__name__)
 
 # 日期 key 正则：匹配 YYYY-MM-DD 格式
 DATE_KEY_RE = re.compile(r'^\d{4}-\d{2}-\d{2}$')
+GALLERY_BASE_MODEL_STYLES = {"cool", "girly", "sweet"}
 LOG_ENTRY_RE = re.compile(
     r'^(?P<ts>\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})(?:,\d+)? '
     r'\[(?P<level>[A-Z]+)\] (?P<logger>[^:]+): (?P<message>.*)$'
 )
 LOG_ACCESS_RE = re.compile(r'"(?P<method>[A-Z]+)\s+(?P<path>[^"]+?)\s+HTTP/[^"]+"\s+(?P<status>\d{3})')
+ICON_PROBE_BASENAME_RE = re.compile(
+    r'^(?:favicon(?:-\d+x\d+)?\.(?:ico|png|svg)|'
+    r'apple-touch-icon(?:-\d+x\d+)?\.png|'
+    r'icon-maskable(?:-\d+(?:x\d+)?)?\.png)$',
+    re.IGNORECASE,
+)
 LOG_LEVEL_LABELS = {
     "DEBUG": "调试",
     "INFO": "信息",
@@ -105,6 +135,20 @@ LOG_LEVEL_LABELS = {
     "ERROR": "错误",
     "CRITICAL": "严重错误",
 }
+LOG_SOURCE_LABELS = {
+    "portrait_gallery": "画廊服务",
+    "web_server": "网页服务",
+    "apscheduler.scheduler": "任务调度",
+    "apscheduler.executors.default": "任务执行",
+    "aiohttp.access": "接口访问",
+}
+LOG_SYSTEM_NOISE_PREFIXES = (
+    "持久化日志已启用",
+    "Scheduler started",
+    "动态任务调度器已启动",
+    "画廊服务启动",
+    "画廊启动",
+)
 LOG_USEFUL_KEYWORDS = (
     "生图",
     "日程",
@@ -161,9 +205,10 @@ LOG_ERROR_DETAIL_KEYWORDS = (
     "超时",
 )
 SEND_CAPTION_DELAY_SECONDS = 3
+SEND_WECHAT_CAPTION_DELAY_SECONDS = 45
 SEND_TIMEOUT_SECONDS = 90
 SEND_RETRY_DELAYS_SECONDS = (60, 180)
-SEND_COOLDOWN_BUFFER_SECONDS = 5
+SEND_COOLDOWN_BUFFER_SECONDS = 15
 SEND_RETRYABLE_MARKERS = (
     "rate limited",
     "too many requests",
@@ -175,6 +220,10 @@ SEND_RETRYABLE_MARKERS = (
     "remoteprotocolerror",
     "server disconnected",
     "temporarily unavailable",
+)
+SEND_CONTEXT_ERROR_MARKERS = (
+    "requires a fresh wechat conversation context",
+    "send the bot a wechat message first",
 )
 DEFAULT_PHOTO_JOB_LIMIT = 6
 MIN_PHOTO_JOB_LIMIT = 3
@@ -202,6 +251,10 @@ REFERENCE_MIME_EXTENSIONS = {
     "image/webp": ".webp",
     "image/gif": ".gif",
 }
+MAX_REFERENCE_UPLOAD_BYTES = 10 * 1024 * 1024
+MAX_REFERENCE_MULTIPART_OVERHEAD_BYTES = 64 * 1024
+MAX_REFERENCE_STYLE_BYTES = 128
+MAX_REFERENCE_IMAGE_PIXELS = 40_000_000
 BUILTIN_REFERENCE_MAP = builtin_reference_map()
 UPDATE_PROTECTED_EXACT = (
     ".env",
@@ -215,16 +268,19 @@ UPDATE_PROTECTED_PREFIXES = (
     "logs/",
     "app/references/uploads/",
 )
-LOCALHOST_NAMES = {"localhost", "127.0.0.1", "::1", "[::1]"}
-READ_ONLY_POST_API_PATHS = {
-    "/api/check-update",
-    "/api/hermes/check-update",
+GALLERY_PASSWORD_ENV = "GALLERY_PASSWORD"
+GALLERY_AUTH_HASH_ALGORITHM = "pbkdf2_sha256"
+GALLERY_AUTH_HASH_ITERATIONS = 240_000
+GALLERY_AUTH_COOKIE = "gallery_session"
+GALLERY_AUTH_SESSION_SECONDS = 7 * 24 * 60 * 60
+GALLERY_AUTH_PUBLIC_PATHS = {
+    "/api/auth/status",
+    "/api/auth/setup",
+    "/api/auth/login",
+    "/api/auth/logout",
+    "/api/health",
 }
-PRIVATE_API_PATH_PREFIXES = (
-    "/api/characters",
-    "/api/group-chat",
-    "/api/keyword-cloud",
-)
+CUSTOM_DEFAULT_REFERENCE_STYLES = ("cool", "girly", "sweet")
 MANUAL_UPDATE_COMMAND = (
     "cd /path/to/portrait-gallery && "
     "git fetch origin main && "
@@ -249,7 +305,7 @@ class GalleryServer:
         self.gallery_config = config.get("gallery", {})
         self.host = self.gallery_config.get("host", "0.0.0.0")
         self.port = self.gallery_config.get("port", 18888)
-        self.token = self.gallery_config.get("token", "")
+        self.auth_store_path = os.path.join(self.data_dir, "gallery_auth.json")
         self.default_image_dir = default_image_dir(data_dir)
         self.image_dir = self._resolve_image_dir()
         self.app_reference_dir = resolve_builtin_reference_dir(config, config_path)
@@ -259,17 +315,23 @@ class GalleryServer:
         self.legacy_uploaded_reference_dir = os.path.join(self.app_reference_dir, "uploads")
         self.picxazz_sync = PicxazzSyncClient(config, data_dir)
         self._image_info_cache = {}
+        self._registered_image_cache = {"signature": None, "filenames": set()}
         self.group_chat_store = GroupChatStore(data_dir)
+        self._group_chat_reply_progress: dict[str, dict] = {}
+        self._group_chat_background_tasks: set[asyncio.Task] = set()
         self._wardrobe_image_locks: dict[str, asyncio.Lock] = {}
         self._manual_send_lock = asyncio.Lock()
         self._manual_send_cooldown_until = 0.0
+        self._manual_send_last_error = ""
+        self._schedule_refresh_task: Optional[asyncio.Task] = None
         self._restart_scheduled = False
         os.makedirs(self.default_image_dir, exist_ok=True)
         os.makedirs(self.image_dir, exist_ok=True)
         os.makedirs(self.reference_dir, exist_ok=True)
         os.makedirs(self.uploaded_reference_dir, exist_ok=True)
         os.makedirs(self.wardrobe_reference_dir, exist_ok=True)
-        load_reference_profiles(
+        self._recover_interrupted_wardrobe_image_statuses()
+        ensure_reference_profiles(
             self.data_dir,
             self.reference_dir,
             self.app_reference_dir,
@@ -284,87 +346,255 @@ class GalleryServer:
         self.on_generate_character_reference = None
         self.on_generate_group = None
         self.on_reroll_image = None
+        self.on_edit_image = None
         self.on_list_photo_jobs = None
         self.on_refresh_schedule = None
         self.on_rebuild_photo_jobs = None
         self.on_retry_photo_job = None
         self.on_update_photo_plan = None
+        self.on_update_outfit_plan = None
         self.on_image_dir_changed = None
 
-        self.app = web.Application(middlewares=[self.api_key_middleware])
+        self.app = web.Application(middlewares=[self.gallery_auth_middleware])
         self._setup_routes()
+        self.app.on_cleanup.append(self._cleanup_group_chat_background_tasks)
+
+    def _now(self) -> datetime:
+        return datetime.now(configured_timezone(getattr(self, "config", {})))
+
+    def _today(self):
+        return self._now().date()
 
     @staticmethod
-    def _request_host_name(request: web.Request) -> str:
-        host = str(request.host or "").split(",", 1)[0].strip().lower()
-        if host.startswith("["):
-            return host[1:].split("]", 1)[0]
-        if host.count(":") == 1:
-            return host.rsplit(":", 1)[0]
-        return host.strip("[]")
-
-    @staticmethod
-    def _is_local_request(request: web.Request) -> bool:
+    def _request_client_ip(request: web.Request) -> str:
         remote = request.remote or ""
         if not remote and request.transport:
             peer = request.transport.get_extra_info("peername")
             if isinstance(peer, tuple) and peer:
                 remote = str(peer[0])
-        remote = str(remote or "").strip().strip("[]")
-        host = GalleryServer._request_host_name(request)
-        host_is_local = host in LOCALHOST_NAMES
-        if remote in LOCALHOST_NAMES:
+        return str(remote or "").strip().strip("[]")
+
+    def _is_local_request(self, request: web.Request) -> bool:
+        remote = self._request_client_ip(request)
+        try:
+            remote_ip = ipaddress.ip_address(str(remote or "").strip().strip("[]"))
+        except ValueError:
+            return False
+        if not remote_ip.is_loopback:
+            return False
+
+        host = str(getattr(request, "host", "") or "").strip()
+        if host.startswith("[") and "]" in host:
+            host = host[1:host.index("]")]
+        elif host.count(":") == 1:
+            host = host.rsplit(":", 1)[0]
+        host = host.strip().lower().rstrip(".")
+        if host == "localhost":
             return True
         try:
-            remote_ip = ipaddress.ip_address(remote)
-            if remote_ip.is_loopback:
-                return True
-            # Docker Desktop / bridge networking can make a host browser opened at
-            # localhost appear to aiohttp as the private bridge gateway. Keep
-            # that local-only flow usable without treating arbitrary hostnames
-            # as trusted.
-            return bool(host_is_local and remote_ip.is_private)
+            return ipaddress.ip_address(host).is_loopback
         except ValueError:
-            return host_is_local
+            return False
+
+    def _load_auth_store(self) -> dict:
+        return LockedJsonDictStore(self.auth_store_path).load()
+
+    def _save_auth_store(self, data: dict) -> None:
+        payload = dict(data or {})
+        payload.pop("authorized_ips", None)
+        payload["version"] = 2
+        LockedJsonDictStore(self.auth_store_path).save(payload)
 
     @staticmethod
-    def _requires_local_or_key(request: web.Request) -> bool:
-        if not request.path.startswith("/api/"):
+    def _hash_gallery_password(password: str, salt_hex: str = "") -> str:
+        salt = bytes.fromhex(salt_hex) if salt_hex else secrets.token_bytes(16)
+        digest = hashlib.pbkdf2_hmac(
+            "sha256",
+            str(password or "").encode("utf-8"),
+            salt,
+            GALLERY_AUTH_HASH_ITERATIONS,
+        )
+        return (
+            f"{GALLERY_AUTH_HASH_ALGORITHM}$"
+            f"{GALLERY_AUTH_HASH_ITERATIONS}$"
+            f"{salt.hex()}$"
+            f"{digest.hex()}"
+        )
+
+    @staticmethod
+    def _verify_gallery_password_hash(password: str, stored_hash: str) -> bool:
+        parts = str(stored_hash or "").split("$")
+        if len(parts) != 4 or parts[0] != GALLERY_AUTH_HASH_ALGORITHM:
             return False
-        if any(request.path.startswith(prefix) for prefix in PRIVATE_API_PATH_PREFIXES):
+        try:
+            iterations = int(parts[1])
+            salt = bytes.fromhex(parts[2])
+            expected = bytes.fromhex(parts[3])
+        except (TypeError, ValueError):
+            return False
+        actual = hashlib.pbkdf2_hmac(
+            "sha256",
+            str(password or "").encode("utf-8"),
+            salt,
+            iterations,
+        )
+        return hmac.compare_digest(actual, expected)
+
+    def _configured_gallery_password_source(self) -> str:
+        if os.environ.get(GALLERY_PASSWORD_ENV, ""):
+            return "env"
+        if self._load_auth_store().get("password_hash"):
+            return "stored"
+        return ""
+
+    def _gallery_password_configured(self) -> bool:
+        return bool(self._configured_gallery_password_source())
+
+    def _verify_gallery_password(self, password: str) -> bool:
+        password = str(password or "")
+        env_password = os.environ.get(GALLERY_PASSWORD_ENV, "")
+        if env_password:
+            return hmac.compare_digest(password, env_password)
+        stored_hash = self._load_auth_store().get("password_hash", "")
+        return self._verify_gallery_password_hash(password, stored_hash)
+
+    def _gallery_password_revision(self) -> str:
+        env_password = os.environ.get(GALLERY_PASSWORD_ENV, "")
+        if env_password:
+            material = f"env:{env_password}"
+        else:
+            material = f"stored:{self._load_auth_store().get('password_hash', '')}"
+        return hashlib.sha256(material.encode("utf-8")).hexdigest()[:20]
+
+    def _gallery_session_secret(self) -> str:
+        store = LockedJsonDictStore(self.auth_store_path)
+        current = str(store.load().get("session_secret") or "").strip()
+        if re.fullmatch(r"[0-9a-fA-F]{64}", current):
+            return current
+        result = {"secret": ""}
+
+        def _ensure(data: dict) -> dict:
+            secret = str(data.get("session_secret") or "").strip()
+            if not re.fullmatch(r"[0-9a-fA-F]{64}", secret):
+                secret = secrets.token_hex(32)
+                data["session_secret"] = secret
+            data.pop("authorized_ips", None)
+            data["version"] = 2
+            result["secret"] = secret
+            return data
+
+        store.update(_ensure)
+        return result["secret"]
+
+    def _issue_gallery_session(self) -> str:
+        expires_at = int(time.time()) + GALLERY_AUTH_SESSION_SECONDS
+        revision = self._gallery_password_revision()
+        nonce = secrets.token_hex(16)
+        payload = f"{expires_at}.{revision}.{nonce}"
+        signature = hmac.new(
+            bytes.fromhex(self._gallery_session_secret()),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return f"{payload}.{signature}"
+
+    def _gallery_session_authorized(self, request: web.Request) -> bool:
+        cookies = getattr(request, "cookies", {}) or {}
+        token = str(cookies.get(GALLERY_AUTH_COOKIE) or "").strip()
+        if not token:
+            headers = getattr(request, "headers", {}) or {}
+            token = str(headers.get("X-Gallery-Session") or "").strip()
+            authorization = str(headers.get("Authorization") or "").strip()
+            if not token and authorization.lower().startswith("bearer "):
+                token = authorization[7:].strip()
+        parts = token.split(".")
+        if len(parts) != 4:
+            return False
+        expires_text, revision, nonce, signature = parts
+        try:
+            if int(expires_text) <= int(time.time()):
+                return False
+        except ValueError:
+            return False
+        if revision != self._gallery_password_revision() or not nonce:
+            return False
+        payload = f"{expires_text}.{revision}.{nonce}"
+        expected = hmac.new(
+            bytes.fromhex(self._gallery_session_secret()),
+            payload.encode("utf-8"),
+            hashlib.sha256,
+        ).hexdigest()
+        return hmac.compare_digest(signature, expected)
+
+    @staticmethod
+    def _set_gallery_session_cookie(response: web.StreamResponse, request: web.Request, token: str) -> None:
+        response.set_cookie(
+            GALLERY_AUTH_COOKIE,
+            token,
+            max_age=GALLERY_AUTH_SESSION_SECONDS,
+            httponly=True,
+            secure=bool(getattr(request, "secure", False)),
+            samesite="Strict",
+            path="/",
+        )
+
+    @staticmethod
+    def _clear_gallery_session_cookie(response: web.StreamResponse) -> None:
+        response.del_cookie(GALLERY_AUTH_COOKIE, path="/")
+
+    def _request_has_gallery_access(self, request: web.Request) -> bool:
+        if self._is_local_request(request):
             return True
-        if request.method.upper() in {"GET", "HEAD", "OPTIONS"}:
+        if not self._gallery_password_configured():
             return False
-        if request.path in READ_ONLY_POST_API_PATHS:
-            return False
-        return True
+        return self._gallery_session_authorized(request)
 
     @staticmethod
-    def _local_or_key_required_payload() -> dict:
+    def _same_origin_write(request: web.Request) -> bool:
+        if str(getattr(request, "method", "GET") or "GET").upper() in {"GET", "HEAD", "OPTIONS"}:
+            return True
+        headers = getattr(request, "headers", {}) or {}
+        origin = str(headers.get("Origin") or "").strip()
+        if not origin:
+            return True
+        parsed = urlparse(origin)
+        return bool(parsed.netloc and parsed.netloc.lower() == str(getattr(request, "host", "") or "").lower())
+
+    def _auth_required_payload(self, request: web.Request) -> tuple[dict, int]:
+        configured = self._gallery_password_configured()
+        is_local = self._is_local_request(request)
+        client_ip = self._request_client_ip(request)
+        if not configured:
+            return {
+                "error": "password_setup_required",
+                "message": "首次部署需要先在本机浏览器设置访问密码。",
+                "auth_configured": False,
+                "setup_allowed": is_local,
+                "client_ip": client_ip,
+            }, 401
         return {
-            "error": "local_or_api_key_required",
-            "message": (
-                "远程写操作需要配置 GALLERY_API_KEY 并通过 X-API-Key 调用；"
-                "如果是从 1.2.3 一键升级被拦截，请在部署机器执行手动安全升级命令。"
-            ),
-            "manual_update_command": MANUAL_UPDATE_COMMAND,
-            "docker_manual_update_command": DOCKER_MANUAL_UPDATE_COMMAND,
-        }
+            "error": "password_required",
+            "message": "请输入画廊访问密码。",
+            "auth_configured": True,
+            "client_ip": client_ip,
+        }, 401
 
-    @staticmethod
     @web.middleware
-    async def api_key_middleware(request: web.Request, handler):
-        """Protect API routes with X-API-Key; local writes may run without a key."""
+    async def gallery_auth_middleware(self, request: web.Request, handler):
+        """Require the gallery password for non-local gallery data access."""
         path = request.path
-        if path.startswith("/api/"):
-            api_key = os.environ.get("GALLERY_API_KEY", "")
-            provided = request.headers.get("X-API-Key", "") or request.query.get("key", "")
-            if api_key:
-                if provided != api_key:
-                    return web.json_response({"error": "unauthorized"}, status=401)
-            elif GalleryServer._requires_local_or_key(request) and not GalleryServer._is_local_request(request):
+        protected_path = (
+            (path.startswith("/api/") and path not in GALLERY_AUTH_PUBLIC_PATHS)
+            or path.startswith("/images/")
+            or path.startswith("/local-refs/")
+        )
+        if protected_path:
+            if not self._request_has_gallery_access(request):
+                payload, status = self._auth_required_payload(request)
+                return web.json_response(payload, status=status)
+            if not self._same_origin_write(request):
                 return web.json_response(
-                    GalleryServer._local_or_key_required_payload(),
+                    {"error": "origin_not_allowed", "message": "请求来源与画廊地址不一致。"},
                     status=403,
                 )
         return await handler(request)
@@ -383,6 +613,10 @@ class GalleryServer:
         self.app.router.add_get("/", self.handle_index)
 
         # API
+        self.app.router.add_get("/api/auth/status", self.handle_auth_status)
+        self.app.router.add_post("/api/auth/setup", self.handle_auth_setup)
+        self.app.router.add_post("/api/auth/login", self.handle_auth_login)
+        self.app.router.add_post("/api/auth/logout", self.handle_auth_logout)
         self.app.router.add_get("/api/today", self.handle_today)
         self.app.router.add_get("/api/gallery", self.handle_gallery)
         self.app.router.add_get("/api/entries/{date}", self.handle_entry)
@@ -414,7 +648,9 @@ class GalleryServer:
         self.app.router.add_post("/api/group-chat/rooms/{room_id}/reply", self.handle_group_chat_reply)
         self.app.router.add_post("/api/group-chat/rooms/{room_id}/bind-agent", self.handle_group_chat_bind_agent)
         self.app.router.add_post("/api/images/cleanup", self.handle_cleanup_images)
+        self.app.router.add_get("/api/images/{img_id}", self.handle_image_detail)
         self.app.router.add_post("/api/images/{img_id}/reroll", self.handle_reroll_image)
+        self.app.router.add_post("/api/images/{img_id}/edit", self.handle_edit_image)
         self.app.router.add_post("/api/images/{img_id}/favorite", self.handle_toggle_favorite)
         self.app.router.add_post("/api/images/{img_id}/send", self.handle_send_image)
         self.app.router.add_post("/api/integrations/picxazz/sync-favorites", self.handle_sync_picxazz_favorites)
@@ -447,6 +683,8 @@ class GalleryServer:
         self.app.router.add_post("/api/photo-jobs/retry", self.handle_retry_photo_job)
         self.app.router.add_patch("/api/photo-jobs/plan", self.handle_update_photo_plan)
         self.app.router.add_post("/api/photo-jobs/plan", self.handle_update_photo_plan)
+        self.app.router.add_patch("/api/schedule-detail/outfit", self.handle_update_outfit_plan)
+        self.app.router.add_post("/api/schedule-detail/outfit", self.handle_update_outfit_plan)
         self.app.router.add_get("/api/photo-job-limit", self.handle_photo_job_limit)
         self.app.router.add_post("/api/photo-job-limit", self.handle_photo_job_limit)
         self.app.router.add_get("/api/favorite-outfits", self.handle_favorite_outfits)
@@ -460,13 +698,6 @@ class GalleryServer:
         # 图片服务
         self.app.router.add_get("/images/{filename:.*}", self.handle_image_file)
 
-    async def _check_auth(self, request: web.Request) -> bool:
-        """简单 token 认证"""
-        if not self.token:
-            return True  # 无 token 时不认证
-        token = request.headers.get("Authorization", "").replace("Bearer ", "")
-        return token == self.token
-
     async def handle_index(self, request: web.Request):
         """返回画廊页面"""
         html_path = os.path.join(os.path.dirname(__file__), "web", "index.html")
@@ -476,6 +707,120 @@ class GalleryServer:
 
     async def handle_health(self, request: web.Request):
         return web.json_response({"status": "ok"})
+
+    async def _read_json_body(self, request: web.Request) -> dict:
+        try:
+            data = await request.json()
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _auth_status_payload(self, request: web.Request) -> dict:
+        password_source = self._configured_gallery_password_source()
+        is_local = self._is_local_request(request)
+        configured = bool(password_source)
+        authorized_session = self._gallery_session_authorized(request) if configured and not is_local else False
+        return {
+            "status": "ok",
+            "auth_configured": configured,
+            "password_source": password_source,
+            "needs_setup": not configured,
+            "setup_allowed": bool(is_local and not configured),
+            "local": bool(is_local),
+            "authorized": bool(is_local or authorized_session),
+            "client_ip": self._request_client_ip(request),
+        }
+
+    async def handle_auth_status(self, request: web.Request):
+        return web.json_response(self._auth_status_payload(request))
+
+    async def handle_auth_setup(self, request: web.Request):
+        if self._gallery_password_configured():
+            return web.json_response(
+                {
+                    "error": "password_already_configured",
+                    "message": "访问密码已经设置。",
+                    **self._auth_status_payload(request),
+                },
+                status=409,
+            )
+        if not self._is_local_request(request):
+            return web.json_response(
+                {
+                    "error": "setup_local_only",
+                    "message": "首次设置访问密码只能在部署机器本机完成。",
+                    **self._auth_status_payload(request),
+                },
+                status=403,
+            )
+
+        body = await self._read_json_body(request)
+        password = str(body.get("password") or "").strip()
+        if len(password) < 6:
+            return web.json_response(
+                {"error": "password_too_short", "message": "访问密码至少需要 6 个字符。"},
+                status=400,
+            )
+
+        data = self._load_auth_store()
+        data["password_hash"] = self._hash_gallery_password(password)
+        data["password_set_at"] = int(time.time())
+        data["password_source"] = "stored"
+        data["session_secret"] = secrets.token_hex(32)
+        self._save_auth_store(data)
+        logger.warning("画廊访问密码已通过本机 Web 首次设置。")
+        payload = self._auth_status_payload(request)
+        payload["authorized"] = True
+        token = self._issue_gallery_session()
+        response = web.json_response({
+            "status": "ok",
+            "session_token": token,
+            "token_type": "GallerySession",
+            "expires_in": GALLERY_AUTH_SESSION_SECONDS,
+            **payload,
+        })
+        self._set_gallery_session_cookie(response, request, token)
+        return response
+
+    async def handle_auth_login(self, request: web.Request):
+        if not self._gallery_password_configured():
+            return web.json_response(
+                {
+                    "error": "password_setup_required",
+                    "message": "首次部署需要先在本机浏览器设置访问密码。",
+                    **self._auth_status_payload(request),
+                },
+                status=401,
+            )
+
+        body = await self._read_json_body(request)
+        password = str(body.get("password") or "")
+        if not self._verify_gallery_password(password):
+            return web.json_response(
+                {"error": "invalid_password", "message": "访问密码不正确。"},
+                status=401,
+            )
+
+        logger.info("画廊访问密码登录成功: ip=%s", self._request_client_ip(request))
+        payload = self._auth_status_payload(request)
+        payload["authorized"] = True
+        token = self._issue_gallery_session()
+        response = web.json_response({
+            "status": "ok",
+            "session_token": token,
+            "token_type": "GallerySession",
+            "expires_in": GALLERY_AUTH_SESSION_SECONDS,
+            **payload,
+        })
+        self._set_gallery_session_cookie(response, request, token)
+        return response
+
+    async def handle_auth_logout(self, request: web.Request):
+        payload = self._auth_status_payload(request)
+        payload["authorized"] = self._is_local_request(request)
+        response = web.json_response({"status": "ok", **payload})
+        self._clear_gallery_session_cookie(response)
+        return response
 
     def _schedule_python_restart(self, reason: str = "manual", delay: float = 0.8) -> tuple[bool, str]:
         if self._restart_scheduled:
@@ -609,6 +954,42 @@ class GalleryServer:
         return (ts or "")[5:]
 
     @staticmethod
+    def _log_category(logger_name: str, message: str) -> tuple[str, str]:
+        if any((message or "").strip().startswith(prefix) for prefix in LOG_SYSTEM_NOISE_PREFIXES):
+            return "system", "系统"
+        text = f"{logger_name} {message}".lower()
+        if logger_name == "aiohttp.access" or "接口" in message:
+            return "api", "接口"
+        if logger_name.startswith("apscheduler"):
+            return "schedule", "日程"
+        if any(word in text for word in ("推送", "发送", "wechat", "weixin", "telegram", "hermes", "openclaw")):
+            return "delivery", "推送"
+        if any(word in text for word in ("日程", "schedule", "动态任务", "动态生图任务", "补拍", "定时任务")):
+            return "schedule", "日程"
+        if any(word in text for word in ("生图", "图片", "generate", "image-to-image", "text-to-image", "底模")):
+            return "image", "生图"
+        if any(word in text for word in ("模型", "model", "llm", "gpt", "gemini", "gitee")):
+            return "model", "模型"
+        if any(word in text for word in ("参考", "衣柜", "wardrobe", "reference", "picxazz")):
+            return "asset", "素材"
+        return "system", "系统"
+
+    @staticmethod
+    def _log_source_label(logger_name: str) -> str:
+        if logger_name in LOG_SOURCE_LABELS:
+            return LOG_SOURCE_LABELS[logger_name]
+        if logger_name.startswith("apscheduler"):
+            return "任务调度"
+        if "zhuzhu" in logger_name:
+            return "生图引擎"
+        return logger_name.rsplit(".", 1)[-1].replace("_", " ") or "系统"
+
+    @staticmethod
+    def _is_log_noise(message: str) -> bool:
+        text = (message or "").strip()
+        return any(text.startswith(prefix) for prefix in LOG_SYSTEM_NOISE_PREFIXES)
+
+    @staticmethod
     def _is_error_detail_line(line: str) -> bool:
         low = (line or "").lower()
         return any(k in low for k in LOG_ERROR_DETAIL_KEYWORDS)
@@ -616,6 +997,12 @@ class GalleryServer:
     @staticmethod
     def _diagnose_error_text(text: str) -> str:
         low = (text or "").lower()
+        if "fresh wechat conversation context" in low or "send the bot a wechat message first" in low:
+            return "微信会话上下文已失效；请先在微信里给 Hermes 发任意一条消息，收到回复后再发送图片。"
+        if "ret=-2" in low and "unknown error" in low:
+            return "微信会话上下文已失效，并非已发送次数过多；请先在微信里给 Hermes 发任意一条消息刷新上下文。"
+        if "ret=-2" in low and "rate limit" in low:
+            return "iLink 返回了 -2；这不代表已有消息发送成功，也可能是微信会话上下文过期。请先给 Hermes 发一条微信消息刷新上下文。"
         if "status=no response" in low or "detail=no response" in low:
             return "该次文本模型请求当时没有拿到响应，不等于模型不可用；如果后续已有成功记录，可以忽略这条旧错误。"
         if "request_failed" in low or "请求超时" in low:
@@ -661,16 +1048,27 @@ class GalleryServer:
             m = re.search(rf'\b{re.escape(key)}=([^,\s]+)', message or "")
         return m.group(1).strip() if m else ""
 
+    @staticmethod
+    def _display_log_image_name(value: str) -> str:
+        filename = os.path.basename(str(value or "").strip())
+        schedule_match = re.search(r'(?:^|_)schedule_(\d{2})(\d{2})(?:_|\.|$)', filename)
+        if schedule_match:
+            return f"{schedule_match.group(1)}:{schedule_match.group(2)} 计划图"
+        if len(filename) <= 36:
+            return filename
+        stem, ext = os.path.splitext(filename)
+        return f"{stem[:24]}…{ext}"
+
     @classmethod
     def _translate_access_log(cls, message: str) -> Optional[str]:
         m = LOG_ACCESS_RE.search(message or "")
         if not m:
             return None
         status = int(m.group("status"))
-        if status < 500:
-            return None
         method = m.group("method")
         path = m.group("path").split("?", 1)[0]
+        if status < 500 or cls._is_ignorable_access_path(path):
+            return None
         return f"接口请求失败：{method} {path} 返回 {status}。"
 
     @staticmethod
@@ -685,6 +1083,12 @@ class GalleryServer:
         }
 
     @staticmethod
+    def _is_ignorable_access_path(path: str) -> bool:
+        clean_path = str(path or "").split("?", 1)[0].rstrip("/")
+        basename = clean_path.rsplit("/", 1)[-1]
+        return bool(ICON_PROBE_BASENAME_RE.fullmatch(basename))
+
+    @staticmethod
     def _is_normal_access_status(status: int) -> bool:
         return 200 <= status < 400
 
@@ -692,10 +1096,90 @@ class GalleryServer:
     def _translate_log_message(cls, message: str, level: str = "INFO", logger_name: str = "") -> str:
         text = (message or "").strip()
 
-        m = re.search(r'开始定时生图:\s*theme=([^,\s]+),\s*schedule_time=([^\s,]+)\s*(.*)', text)
+        if text == "Scheduler started":
+            return "任务调度器已启动。"
+        if text.startswith("持久化日志已启用"):
+            return "日志系统已启动，历史日志会自动轮转清理。"
+        if text == "动态任务调度器已启动":
+            return "动态任务调度器已启动。"
+        if text.startswith("Added job ") and "job store" in text:
+            return "任务已加入调度队列。"
+        if text.startswith("Removed job "):
+            return "调度队列中的旧任务已移除。"
+        if text.startswith("Running job "):
+            return "调度任务开始执行。"
+        if text.startswith("Job ") and "executed successfully" in text:
+            return "调度任务执行完成。"
+
+        m = re.search(r'手动发送图片:\s*channel=([^\s]+).*?image=([^\s]+)', text)
         if m:
-            activity = (m.group(3) or "").strip()
-            return f"开始定时生图：{m.group(2)}，动作：{activity or '未记录'}。"
+            channel_label = "微信" if m.group(1) == "wechat" else "TG" if m.group(1) == "telegram" else m.group(1)
+            return f"开始手动发送图片到{channel_label}：{cls._display_log_image_name(m.group(2))}。"
+
+        m = re.search(r'重抽沿用原参考图:\s*([^\s]+)\s+ref=(.+)$', text)
+        if m:
+            return f"重抽沿用原参考图：{cls._display_log_image_name(m.group(1))}，参考：{m.group(2).strip()}。"
+
+        m = re.search(r'发送(微信|TG)图片:\s*attempt=(\d+)/(\d+)', text)
+        if m:
+            return f"正在发送{m.group(1)}图片：第 {m.group(2)}/{m.group(3)} 次。"
+
+        m = re.search(r'(微信|TG)图片发送超时:\s*attempt=(\d+)/(\d+)', text)
+        if m:
+            return f"{m.group(1)}图片发送超时：第 {m.group(2)}/{m.group(3)} 次。"
+
+        m = re.search(r'准备推送图片:\s*channel=([^,\s]+),\s*agent=([^,\s]+)', text)
+        if m:
+            channel_label = "微信" if m.group(1) == "wechat" else "TG" if m.group(1) == "telegram" else m.group(1)
+            return f"准备通过 {m.group(2)} 推送图片到{channel_label}。"
+
+        m = re.search(r'(微信|TG)图片发送重试等待\s*([0-9.]+)s\s*\((\d+)/(\d+)\)', text)
+        if m:
+            return f"{m.group(1)}图片发送将在 {m.group(2)} 秒后重试：下一次为第 {m.group(3)}/{m.group(4)} 次。"
+
+        if text.startswith("微信图片发送失败") or text.startswith("TG图片发送失败"):
+            channel_label = "微信" if text.startswith("微信") else "TG"
+            return f"{channel_label}图片发送失败：{cls._diagnose_error_text(text)}"
+
+        if text.startswith("微信图片发送停止重试"):
+            return (
+                "微信图片发送已停止：会话上下文已失效，并非真实限流；"
+                "请先在微信里给 Hermes 发任意一条消息，收到回复后再重试。"
+            )
+
+        if any(text.startswith(prefix) for prefix in (
+            "微信图片发送最终失败",
+            "微信发送最终失败",
+            "TG图片发送最终失败",
+            "TG发送最终失败",
+        )):
+            channel_label = "微信" if text.startswith("微信") else "TG"
+            return f"{channel_label}图片最终发送失败：{cls._diagnose_error_text(text)}"
+
+        if any(text.startswith(prefix) for prefix in (
+            "微信发送失败: 图片未送达",
+            "微信手动发送失败: 图片未送达",
+            "TG发送失败: 图片未送达",
+            "TG手动发送失败: 图片未送达",
+        )):
+            channel_label = "微信" if text.startswith("微信") else "TG"
+            return f"{channel_label}图片未送达，已跳过文案发送。"
+
+        if text.startswith("推送未完全成功"):
+            return "图片推送未完成，请查看前面的失败原因。"
+
+        if text.startswith("微信图片发送成功") or text.startswith("TG图片发送成功"):
+            channel_label = "微信" if text.startswith("微信") else "TG"
+            return f"{channel_label}图片发送成功。"
+
+        m = re.search(
+            r'开始定时生图:\s*theme=([^,\s]+),(?:\s*size=([^,\s]+),)?\s*schedule_time=([^\s,]+)\s*(.*)',
+            text,
+        )
+        if m:
+            activity = (m.group(4) or "").strip()
+            size_text = f"，尺寸：{m.group(2)}" if m.group(2) else ""
+            return f"开始定时生图：{m.group(3)}{size_text}，动作：{activity or '未记录'}。"
 
         m = re.search(r'定时任务已设置:\s*日程\(([^)]+)\)\s*\+\s*动态生图\(根据日程时间\)', text)
         if m:
@@ -820,9 +1304,20 @@ class GalleryServer:
         if m:
             return f"开始生图：引擎 {m.group(2)}，模型 {m.group(3)}，风格 {m.group(4)}，尺寸 {m.group(5)}。"
 
+        m = re.search(
+            r'生图引擎自动回退:\s*requested=([^,\s]+),\s*failed=([^,\s]+),\s*actual=([^,\s]+),\s*reason=(.*)',
+            text,
+        )
+        if m:
+            labels = {"gptimage": "GPT Image", "gitee": "Gitee", "gemini": "Gemini"}
+            failed_label = labels.get(m.group(2), m.group(2))
+            actual_label = labels.get(m.group(3), m.group(3))
+            reason = m.group(4).strip().rstrip("。")
+            return f"{failed_label} 生图失败，已自动改用 {actual_label}；最终图片由 {actual_label} 生成。原因：{reason}。"
+
         m = re.search(r'生图成功:\s*(.+)', text)
         if m:
-            return f"生图成功：{m.group(1).strip()}。"
+            return f"生图成功：{cls._display_log_image_name(m.group(1))}。"
 
         if text.startswith("生图失败"):
             return "生图失败：" + cls._diagnose_error_text(text)
@@ -838,8 +1333,9 @@ class GalleryServer:
             return text + "。"
         if text.startswith("自定义生图失败") or text.startswith("Custom generate error"):
             return "自定义生图失败：" + cls._diagnose_error_text(text)
-        if text.startswith("图片重抽成功"):
-            return text + "。"
+        m = re.search(r'图片重抽成功:\s*([^\s]+)\s*->\s*([^\s]+)', text)
+        if m:
+            return f"图片重抽成功：{cls._display_log_image_name(m.group(1))} 已替换为新图。"
         if text.startswith("图片重抽失败") or text.startswith("Reroll image error"):
             return "图片重抽失败：" + cls._diagnose_error_text(text)
 
@@ -863,6 +1359,10 @@ class GalleryServer:
             return "Agnes 图片接口失败，已停止，不再改走 GPT 聊天兼容端点。"
         if text.startswith("Agnes Images API unsupported; not retrying chat-compatible GPT Image endpoint"):
             return "当前中转不支持 Agnes 图片接口，已停止，不再改走 GPT 聊天兼容端点。"
+        if text.startswith("Images API failed; chat-compatible GPT Image fallback is disabled"):
+            return "图片接口失败，Chat 端点回退未开启，已停止继续换线路。"
+        if text.startswith("Images API unsupported; chat-compatible GPT Image fallback is disabled"):
+            return "当前中转不支持 Images API，Chat 端点回退未开启，未改走 /chat/completions。"
         if text.startswith("Images API failed; retrying chat-compatible GPT Image endpoint"):
             return "图片接口失败，正在改用聊天兼容 GPT Image 端点重试。"
         if (
@@ -1085,8 +1585,21 @@ class GalleryServer:
 
             match = LOG_ENTRY_RE.match(line)
             if not match:
-                if entries and cls._is_error_detail_line(line):
-                    entries[-1]["message"] = f"{entries[-1]['message']} | {line.strip()}"
+                if entries:
+                    detail_line = line.strip()
+                    previous_detail = str(entries[-1].get("detail") or "").strip()
+                    entries[-1]["detail"] = (
+                        f"{previous_detail}\n{detail_line}".strip()
+                        if previous_detail
+                        else detail_line
+                    )
+                    if cls._is_error_detail_line(line):
+                        diagnosis = cls._diagnose_error_text(entries[-1]["detail"])
+                        if diagnosis != "详见下方原始错误。":
+                            entries[-1]["message"] = entries[-1]["message"].replace(
+                                "详见下方原始错误。",
+                                diagnosis,
+                            )
                 continue
 
             ts = match.group("ts")
@@ -1098,7 +1611,10 @@ class GalleryServer:
             if logger_name == "aiohttp.access":
                 access = cls._access_log_parts(message)
                 if access:
-                    if cls._is_normal_access_status(access["status"]):
+                    if (
+                        cls._is_normal_access_status(access["status"])
+                        or cls._is_ignorable_access_path(access["path"])
+                    ):
                         hidden_access_count += 1
                         continue
                     message_text = f"接口异常：{access['method']} {access['path']} -> {access['status']}"
@@ -1111,28 +1627,58 @@ class GalleryServer:
             else:
                 message_text = cls._translate_log_message(message, level, logger_name)
 
+            category, category_label = cls._log_category(logger_name, f"{message} {message_text}")
+            translated = message_text.strip()
+            raw_message = message.strip()
+            is_noise = cls._is_log_noise(raw_message)
             entries.append({
                 "time": cls._format_log_time(ts),
                 "level": display_level,
                 "logger": logger_name,
-                "message": message_text,
+                "source": cls._log_source_label(logger_name),
+                "category": category,
+                "category_label": category_label,
+                "message": translated,
+                "detail": raw_message if raw_message != translated else "",
+                "important": display_level in {"WARN", "ERROR"} or (
+                    not is_noise and cls._is_useful_log_message(level, logger_name, message, line)
+                ),
+                "repeat_count": 1,
             })
 
-        selected = entries[-max_items:]
+        collapsed = {}
+        for item in entries:
+            key = (item["level"], item["category"], item["message"])
+            previous = collapsed.pop(key, None)
+            if previous:
+                item["repeat_count"] = previous.get("repeat_count", 1) + 1
+                item["first_time"] = previous.get("first_time") or previous.get("time")
+            collapsed[key] = item
+
+        selected = list(collapsed.values())[-max_items:]
         counts = {"DEBUG": 0, "INFO": 0, "WARN": 0, "ERROR": 0}
+        event_counts = {"DEBUG": 0, "INFO": 0, "WARN": 0, "ERROR": 0}
         for item in selected:
             counts[item["level"]] = counts.get(item["level"], 0) + 1
+            event_counts[item["level"]] = event_counts.get(item["level"], 0) + item.get("repeat_count", 1)
+
+        important_count = sum(1 for item in selected if item.get("important"))
 
         output = [
             f"运行日志（最近 {len(selected)} 条）",
-            f"INFO {counts.get('INFO', 0)} · DEBUG {counts.get('DEBUG', 0)} · WARN {counts.get('WARN', 0)} · ERROR {counts.get('ERROR', 0)}",
+            f"重点 {important_count} · INFO {counts.get('INFO', 0)} · DEBUG {counts.get('DEBUG', 0)} · WARN {counts.get('WARN', 0)} · ERROR {counts.get('ERROR', 0)}",
         ]
         if hidden_access_count:
-            output.append(f"已隐藏普通接口访问日志 {hidden_access_count} 条（2xx/3xx）。")
+            output.append(f"已隐藏普通接口访问或图标探测日志 {hidden_access_count} 条。")
         if selected:
             output.append("")
             for item in selected:
-                output.append(f"[{item['level']}] {item['time']} {item['logger']} ｜ {item['message']}")
+                repeat_count = max(0, item.get("repeat_count", 1) - 1)
+                repeat = f" 重复 {repeat_count} 次" if repeat_count else ""
+                output.append(
+                    f"[{item['level']}] {item['time']} [{item['category_label']}] "
+                    f"{item['message']}{repeat}"
+                )
         else:
             output.append("")
             output.append("最近没有可显示的分类日志。")
@@ -1141,21 +1687,23 @@ class GalleryServer:
             "text": "\n".join(output),
             "filtered_count": len(selected),
             "total_count": len(entries),
+            "entries": selected,
+            "important_count": important_count,
             "raw_error_count": counts.get("ERROR", 0),
             "level_counts": counts,
+            "level_event_counts": event_counts,
             "hidden_access_count": hidden_access_count,
         }
 
     async def handle_logs(self, request: web.Request):
         """Return a tail of the live gallery service log for the UI log viewer."""
-        api_key = os.environ.get("GALLERY_API_KEY", "")
-        if not api_key and not self._is_local_request(request):
+        if not self._request_has_gallery_access(request):
             return web.json_response(
                 {
-                    "error": "local_only",
-                    "message": "实时日志只允许本机查看；远程查看请配置 GALLERY_API_KEY。",
+                    "error": "password_required",
+                    "message": "请输入画廊访问密码。",
                 },
-                status=403,
+                status=401,
             )
         try:
             lines = int(request.query.get("lines", "300"))
@@ -1176,7 +1724,7 @@ class GalleryServer:
             mode = str(request.query.get("mode") or "").strip().lower()
             raw_mode = mode == "raw" or request.query.get("raw") == "1"
             level_mode = mode in {"levels", "level", "structured"}
-            read_lines = lines if raw_mode else min(5000, lines * (8 if level_mode else 4))
+            read_lines = lines if raw_mode else min(20000, max(5000, lines * (100 if level_mode else 20)))
             text = self._redact_log_text(self._tail_log_file(path, read_lines))
             stat = os.stat(path)
             payload = {
@@ -1419,6 +1967,34 @@ class GalleryServer:
             logger.error("Load favorite outfits error: %s", e)
             return []
 
+    def _recover_interrupted_wardrobe_image_statuses(self) -> None:
+        """Mark persisted in-progress states as interrupted after a process restart."""
+        now = int(time.time())
+
+        def _recover(items: list[dict]) -> list[dict]:
+            updated = []
+            for item in items:
+                candidate = dict(item)
+                status = candidate.get("wardrobe_image_status")
+                state = str((status or {}).get("status") or "").strip()
+                if state in {"queued", "generating"}:
+                    started_at = int((status or {}).get("started_at") or (status or {}).get("updated_at") or now)
+                    candidate["wardrobe_image_status"] = {
+                        "status": "failed",
+                        "message": "上次衣架图任务因服务重启中断，可以重试",
+                        "error": "generation_interrupted",
+                        "started_at": started_at,
+                        "updated_at": now,
+                    }
+                updated.append(candidate)
+            return updated
+
+        try:
+            if os.path.exists(self._favorite_outfits_path()):
+                self._update_favorite_outfits(_recover)
+        except Exception as e:
+            logger.error("Recover interrupted wardrobe image states failed: %s", e)
+
     def _favorite_outfit_by_id(self, outfit_id: str) -> Optional[dict]:
         if not outfit_id:
             return None
@@ -1532,7 +2108,7 @@ class GalleryServer:
         if not isinstance(outfit, dict) or not outfit:
             return web.json_response({"error": "outfit_required"}, status=400)
 
-        date_text = str(body.get("date") or date.today().isoformat()).strip()
+        date_text = str(body.get("date") or self._today().isoformat()).strip()
         outfit_style = str(body.get("outfit_style") or outfit.get("风格") or "").strip()
         outfit_id = self._favorite_outfit_id(date_text, outfit_style, outfit)
 
@@ -1768,7 +2344,7 @@ class GalleryServer:
         })
 
     async def handle_disliked_outfits(self, request: web.Request):
-        """记录用户不喜欢的今日穿搭方案，供后续日程 LLM 减少相似风格。"""
+        """记录用户不喜欢的今日穿搭方案，供后续日程阻止高度相似穿搭。"""
         if request.method == "GET":
             items = sorted(
                 [self._favorite_outfit_response_item(item) for item in self._load_disliked_outfits()],
@@ -1779,7 +2355,7 @@ class GalleryServer:
                 "items": items,
                 "count": len(items),
                 "generation_reference": bool(items),
-                "reference_scope": "negative_hair_outfit_style_only",
+                "reference_scope": "hard_negative_outfit_similarity",
             })
 
         try:
@@ -1793,7 +2369,7 @@ class GalleryServer:
         if not isinstance(outfit, dict) or not outfit:
             return web.json_response({"error": "outfit_required"}, status=400)
 
-        date_text = str(body.get("date") or date.today().isoformat()).strip()
+        date_text = str(body.get("date") or self._today().isoformat()).strip()
         outfit_style = str(body.get("outfit_style") or outfit.get("风格") or "").strip()
         outfit_id = self._favorite_outfit_id(date_text, outfit_style, outfit)
 
@@ -1825,7 +2401,8 @@ class GalleryServer:
             if should_dislike:
                 next_items.insert(0, item)
             next_items.sort(key=lambda x: x.get("created_at", 0), reverse=True)
-            return next_items[:50]
+            # This file is the scheduler's permanent hard-deny history.
+            return next_items
 
         try:
             items = self._update_disliked_outfits(_apply)
@@ -2041,6 +2618,14 @@ class GalleryServer:
                     raise
 
                 return wardrobe_payload
+        except Exception as e:
+            self._set_favorite_outfit_wardrobe_status(
+                outfit_id,
+                "failed",
+                "衣架图生成失败，可以手动重试",
+                str(e),
+            )
+            raise
         finally:
             try:
                 if not lock.locked():
@@ -2226,6 +2811,32 @@ class GalleryServer:
             local = ""
         return local or os.environ.get("GPT_IMAGE_BASE_URL", "") or configured
 
+    def _effective_gitee_image_url(self, keys_config: Optional[dict] = None) -> str:
+        keys_config = keys_config if isinstance(keys_config, dict) else self._load_api_keys_config()
+        image_config = self.config.get("image_gen", {}) if isinstance(self.config.get("image_gen"), dict) else {}
+        configured = str(image_config.get("gitee_url", "") or DEFAULT_GITEE_IMAGE_URL).strip()
+        local = str(keys_config.get("gitee_url", "") or "").strip()
+        if local == configured:
+            local = ""
+        return os.environ.get("GITEE_API_URL", "").strip() or local or configured
+
+    def _effective_gitee_api_key(
+        self,
+        plugin_config: Optional[dict] = None,
+        local_override: str = "",
+    ) -> str:
+        plugin_config = plugin_config if isinstance(plugin_config, dict) else self._load_plugin_config()
+        gitee_config = plugin_config.get("gitee_config", {})
+        if not isinstance(gitee_config, dict):
+            gitee_config = {}
+        api_keys = gitee_config.get("api_keys", [])
+        local_key = str((api_keys[0] if isinstance(api_keys, list) and api_keys else "") or "").strip()
+        return (
+            os.environ.get("GITEE_API_KEY", "").strip()
+            or str(local_override or "").strip()
+            or local_key
+        )
+
     @classmethod
     def _models_base_url(cls, url: str) -> str:
         base = cls._configured_image_base_url(url)
@@ -2235,6 +2846,12 @@ class GalleryServer:
 
     def _resolve_image_dir(self) -> str:
         image_dir = resolve_image_dir(self.config, self.data_dir)
+        if not self._image_dir_is_allowed(image_dir):
+            logger.error(
+                "Configured image dir is outside allowed roots: %s; using default",
+                image_dir,
+            )
+            return self.default_image_dir
         if os.path.exists(image_dir) and not os.path.isdir(image_dir):
             logger.error(f"Configured image dir is not a directory: {image_dir}; using default")
             return self.default_image_dir
@@ -2242,7 +2859,9 @@ class GalleryServer:
 
     def _set_runtime_image_dir(self, image_dir: str):
         image_dir = image_dir or self.default_image_dir
-        self.image_dir = os.path.abspath(os.path.expanduser(image_dir))
+        if not self._image_dir_is_allowed(image_dir):
+            raise ValueError("image_dir_not_allowed")
+        self.image_dir = str(Path(image_dir).expanduser().resolve())
         os.makedirs(self.image_dir, exist_ok=True)
         if self.on_image_dir_changed:
             self.on_image_dir_changed(self.image_dir)
@@ -2255,15 +2874,85 @@ class GalleryServer:
                 result.append(clean)
         return result
 
+    def _allowed_image_roots(self) -> list[Path]:
+        roots = [Path(self.data_dir)]
+        configured = self.gallery_config.get("allowed_image_roots", [])
+        if isinstance(configured, str):
+            configured = [configured]
+        for value in configured if isinstance(configured, (list, tuple)) else []:
+            raw = str(value or "").strip()
+            if raw:
+                roots.append(Path(raw).expanduser())
+        result = []
+        for root in roots:
+            try:
+                resolved = root.resolve()
+            except OSError:
+                continue
+            if resolved not in result:
+                result.append(resolved)
+        return result
+
+    def _image_dir_is_allowed(self, image_dir: str) -> bool:
+        try:
+            candidate = Path(image_dir).expanduser().resolve()
+        except OSError:
+            return False
+        for root in self._allowed_image_roots():
+            try:
+                candidate.relative_to(root)
+                return True
+            except ValueError:
+                continue
+        return False
+
     @staticmethod
     def _safe_image_relative_path(filename: str) -> Optional[Path]:
         raw = unquote(filename or "").strip()
         if not raw or raw.startswith(("/", "\\")) or "\x00" in raw:
             return None
         rel = Path(raw)
-        if rel.is_absolute() or any(part in ("", ".", "..") for part in rel.parts):
+        if (
+            rel.is_absolute()
+            or len(rel.parts) != 1
+            or any(part in ("", ".", "..") for part in rel.parts)
+            or not rel.name.lower().endswith(REFERENCE_IMAGE_EXTENSIONS)
+        ):
             return None
         return rel
+
+    def _registered_image_filenames(self) -> set[str]:
+        schedule_path = os.path.join(self.data_dir, "schedule_data.json")
+        metadata_path = os.path.join(self.data_dir, "image_metadata.json")
+        signature = []
+        for path in (schedule_path, metadata_path):
+            try:
+                stat = os.stat(path)
+                signature.append((path, stat.st_ino, stat.st_mtime_ns, stat.st_size))
+            except OSError:
+                signature.append((path, 0, 0, 0))
+        signature_value = tuple(signature)
+        if self._registered_image_cache.get("signature") == signature_value:
+            return set(self._registered_image_cache.get("filenames") or set())
+
+        filenames = set()
+        for key, entry in ScheduleStore(self.data_dir).load().items():
+            if not isinstance(entry, dict):
+                continue
+            filename = str(entry.get("image_filename") or "").strip()
+            if not filename and str(key).lower().endswith(REFERENCE_IMAGE_EXTENSIONS):
+                filename = str(key)
+            if self._safe_image_relative_path(filename):
+                filenames.add(filename)
+        for filename in ImageMetadataStore(self.data_dir).load():
+            if self._safe_image_relative_path(str(filename)):
+                filenames.add(str(filename))
+
+        self._registered_image_cache = {
+            "signature": signature_value,
+            "filenames": set(filenames),
+        }
+        return filenames
 
     def _image_file_path(self, filename: str) -> str:
         rel = self._safe_image_relative_path(filename)
@@ -2359,9 +3048,61 @@ class GalleryServer:
                 errors.append(f"{candidate}: {e}")
         return deleted, errors
 
+    @staticmethod
+    def _normalize_gallery_image_filename(filename: str) -> str:
+        raw = unquote(str(filename or "")).strip()
+        if not raw or not re.fullmatch(r"[a-zA-Z0-9_.-]+", raw) or ".." in raw:
+            raise ValueError("invalid_filename")
+        return raw
+
+    def _delete_gallery_image(self, filename: str) -> dict:
+        """Remove one image from storage, gallery data, and image metadata."""
+        img_id = self._normalize_gallery_image_filename(filename)
+        deleted_file_count, errors = self._delete_image_files(img_id)
+
+        removed_entry_count = 0
+        store = ScheduleStore(self.data_dir)
+
+        def _delete_entries(all_data):
+            nonlocal removed_entry_count
+            if not isinstance(all_data, dict):
+                return all_data
+            for key, entry in list(all_data.items()):
+                if key == img_id or (
+                    isinstance(entry, dict)
+                    and entry.get("image_filename") == img_id
+                ):
+                    del all_data[key]
+                    removed_entry_count += 1
+            return all_data
+
+        store.update(_delete_entries)
+
+        metadata_deleted = False
+
+        def _delete_metadata(metadata):
+            nonlocal metadata_deleted
+            if img_id in metadata:
+                del metadata[img_id]
+                metadata_deleted = True
+            return metadata
+
+        ImageMetadataStore(self.data_dir).update(_delete_metadata)
+
+        return {
+            "image_filename": img_id,
+            "deleted_file_count": deleted_file_count,
+            "removed_entry_count": removed_entry_count,
+            "metadata_deleted": metadata_deleted,
+            "errors": errors,
+        }
+
     async def handle_image_file(self, request: web.Request):
         filename = request.match_info.get("filename", "")
-        path = self._image_file_path(filename)
+        rel = self._safe_image_relative_path(filename)
+        if rel is None or rel.name not in self._registered_image_filenames():
+            raise web.HTTPNotFound()
+        path = self._image_file_path(rel.name)
         if not path:
             raise web.HTTPNotFound()
         try:
@@ -2472,11 +3213,12 @@ class GalleryServer:
             "error": "send_failed",
             "channel": channel,
             "agent": delivery.get("agent", ""),
-            "message": f"{label}发送失败，请查看运行日志。",
+            "message": self._manual_send_last_error or f"{label}发送失败，请查看运行日志。",
         }, status=500)
 
     async def _send_existing_image(self, channel: str, image_path: str, caption: str, delivery: dict) -> bool:
         channel = normalize_push_channel(channel)
+        self._manual_send_last_error = ""
         agent = delivery.get("agent", "")
         logger.info("手动发送图片: channel=%s agent=%s image=%s", channel, agent, os.path.basename(image_path))
         if agent == "openclaw":
@@ -2527,7 +3269,9 @@ class GalleryServer:
                 return False
             caption_ok = True
             if caption:
-                await asyncio.sleep(SEND_CAPTION_DELAY_SECONDS)
+                caption_delay = SEND_WECHAT_CAPTION_DELAY_SECONDS if channel == "wechat" else SEND_CAPTION_DELAY_SECONDS
+                logger.info("%s图片发送成功，等待 %ss 后发送文案以降低限流概率", label, caption_delay)
+                await asyncio.sleep(caption_delay)
                 caption_ok = await self._run_manual_hermes_send(
                     hermes_cmd,
                     target,
@@ -2645,6 +3389,19 @@ class GalleryServer:
                 logger.info("%s发送成功", label)
                 return True
             last_output = output or f"exit code {result.returncode}"
+            if self._is_wechat_context_error(last_output):
+                self._manual_send_last_error = (
+                    "微信会话上下文已失效。请先在微信里给 Hermes 发任意一条消息，"
+                    "收到回复后再重新发送图片。"
+                )
+                log_fn = logger.error if required else logger.warning
+                log_fn(
+                    "%s发送停止重试: 微信会话上下文已失效；"
+                    "请先在微信里给 Hermes 发任意一条消息，收到回复后再重试。 output=%s",
+                    label,
+                    last_output,
+                )
+                return False
             retryable = self._is_retryable_send_error(last_output)
             cooldown_seconds = self._extract_send_cooldown_seconds(last_output)
             if cooldown_seconds:
@@ -2689,7 +3446,19 @@ class GalleryServer:
         return ("..." + output[-1500:]) if len(output) > 1500 else output
 
     @staticmethod
-    def _is_retryable_send_error(output: str) -> bool:
+    def _is_wechat_context_error(output: str) -> bool:
+        text = (output or "").lower()
+        if any(marker in text for marker in SEND_CONTEXT_ERROR_MARKERS):
+            return True
+        has_minus_two = bool(
+            re.search(r'\b(?:ret|errcode)\b["\']?\s*(?:=|:)\s*-2\b', text)
+        )
+        return has_minus_two and "unknown error" in text
+
+    @classmethod
+    def _is_retryable_send_error(cls, output: str) -> bool:
+        if cls._is_wechat_context_error(output):
+            return False
         text = (output or "").lower()
         return any(marker in text for marker in SEND_RETRYABLE_MARKERS)
 
@@ -2809,18 +3578,26 @@ class GalleryServer:
 
     def _has_image_generation_key(self) -> bool:
         keys = self._load_api_keys_config()
-        image_config = self.config.get("image_gen", {}) if isinstance(self.config.get("image_gen"), dict) else {}
-        if (
-            keys.get("gpt_base_url")
-            or os.getenv("GPT_IMAGE_BASE_URL")
-            or image_config.get("gpt_base_url")
-            or keys.get("gpt_key")
-            or os.getenv("GPT_IMAGE_API_KEY")
+        endpoints = keys.get("gpt_image_endpoints") or []
+        if any(
+            isinstance(item, dict)
+            and str(item.get("base_url", "") or "").strip()
+            and str(item.get("api_key", "") or "").strip()
+            for item in endpoints
         ):
             return True
+        gpt_url = self._effective_gpt_image_base_url(keys)
+        gpt_key = (
+            str(keys.get("gpt_key", "") or "").strip()
+            or os.getenv("GPT_IMAGE_API_KEY", "").strip()
+            or str(keys.get("cpa_key", "") or "").strip()
+            or os.getenv("CPA_API_KEY", "").strip()
+        )
+        if gpt_url and gpt_key:
+            return True
         plugin_config = self._load_plugin_config()
-        gitee_keys = plugin_config.get("gitee_config", {}).get("api_keys", [])
-        return bool(gitee_keys and gitee_keys[0])
+        gitee_key = self._effective_gitee_api_key(plugin_config)
+        return bool(self._effective_gitee_image_url(keys) and gitee_key)
 
     def _python_executable(self) -> str:
         return configured_python(self.config) or sys.executable
@@ -2870,18 +3647,30 @@ class GalleryServer:
             env=env,
         )
 
+    def _local_update_changed_files(self, project_root: Path, env: dict[str, str]) -> list[str]:
+        """Return all staged, unstaged, and untracked paths conservatively."""
+        commands = (
+            ["diff", "--no-renames", "--name-only", "--"],
+            ["diff", "--cached", "--no-renames", "--name-only", "--"],
+            ["ls-files", "--others", "--exclude-standard"],
+        )
+        changed = set()
+        for args in commands:
+            result = self._git_run(args, project_root, env)
+            if result.returncode != 0:
+                raise RuntimeError(
+                    result.stderr.strip()
+                    or result.stdout.strip()
+                    or "无法读取本地改动列表"
+                )
+            changed.update(line.strip() for line in result.stdout.splitlines() if line.strip())
+        return sorted(changed)
+
     def _safe_update_ref(self, remote: str, branch: str) -> str:
         remote_ref = f"{remote}/{branch}"
         if not re.match(r"^[A-Za-z0-9._/-]+$", remote_ref):
             raise ValueError("更新源包含非法字符")
         return remote_ref
-
-    def _safe_update_changed_files(self, project_root: Path, remote_ref: str, env: dict[str, str]) -> list[str]:
-        result = self._git_run(["diff", "--name-only", "HEAD.." + remote_ref, "--"], project_root, env)
-        if result.returncode != 0:
-            raise RuntimeError(result.stderr.strip() or result.stdout.strip() or "无法读取远端改动列表")
-        files = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-        return [path for path in files if not self._is_protected_update_path(path)]
 
     @staticmethod
     def _body_bool(body: dict, key: str, default: bool = False) -> bool:
@@ -2898,6 +3687,39 @@ class GalleryServer:
         if text in {"0", "false", "no", "off", ""}:
             return False
         return default
+
+    @staticmethod
+    def _atomic_replace_text_files(files: list[tuple[str, str]]) -> None:
+        """Stage every text payload before replacing any destination file."""
+        staged: list[tuple[str, str]] = []
+        try:
+            for path, content in files:
+                parent = os.path.dirname(os.path.abspath(path))
+                os.makedirs(parent, exist_ok=True)
+                fd, temp_path = tempfile.mkstemp(
+                    dir=parent,
+                    prefix=f".{os.path.basename(path)}.",
+                    suffix=".tmp",
+                )
+                try:
+                    if os.path.exists(path):
+                        os.fchmod(fd, os.stat(path).st_mode & 0o777)
+                    with os.fdopen(fd, "w", encoding="utf-8") as file_obj:
+                        file_obj.write(content)
+                        file_obj.flush()
+                        os.fsync(file_obj.fileno())
+                except Exception:
+                    if os.path.exists(temp_path):
+                        os.unlink(temp_path)
+                    raise
+                staged.append((temp_path, path))
+
+            for temp_path, path in staged:
+                os.replace(temp_path, path)
+        finally:
+            for temp_path, _path in staged:
+                if os.path.exists(temp_path):
+                    os.unlink(temp_path)
 
     @staticmethod
     def _clamp_photo_job_limit(value) -> int:
@@ -2944,7 +3766,7 @@ class GalleryServer:
         return limit
 
     def _today_completed_photo_count(self) -> int:
-        today_str = date.today().isoformat()
+        today_str = self._today().isoformat()
         seen = set()
         try:
             store = ScheduleStore(self.data_dir)
@@ -2957,6 +3779,8 @@ class GalleryServer:
                 if entry.get("date") != today_str or entry.get("status") != "ok":
                     continue
                 if entry.get("source", "") != "cron":
+                    continue
+                if entry.get("delivery_status") in {"sending", "failed"}:
                     continue
                 img_file = entry.get("image_filename", "")
                 if not img_file or img_file in seen:
@@ -2974,7 +3798,7 @@ class GalleryServer:
             max_daily = self.get_photo_job_limit()
             return web.json_response({
                 "status": "unavailable",
-                "date": date.today().isoformat(),
+                "date": self._today().isoformat(),
                 "jobs": [],
                 "max_daily": max_daily,
                 "min": MIN_PHOTO_JOB_LIMIT,
@@ -2989,12 +3813,16 @@ class GalleryServer:
             jobs = self.on_list_photo_jobs()
             max_daily = self.get_photo_job_limit()
             completed_today = self._today_completed_photo_count()
-            active_today = sum(1 for job in jobs if job.get("status") in ("scheduled", "running"))
-            failed_today = sum(1 for job in jobs if job.get("status") == "failed")
+            active_today = sum(
+                1 for job in jobs if job.get("status") in ("scheduled", "running", "sending")
+            )
+            failed_today = sum(
+                1 for job in jobs if job.get("status") in ("failed", "delivery_failed")
+            )
             planned_today = completed_today + len(jobs)
             return web.json_response({
                 "status": "ok",
-                "date": date.today().isoformat(),
+                "date": self._today().isoformat(),
                 "jobs": jobs,
                 "max_daily": max_daily,
                 "min": MIN_PHOTO_JOB_LIMIT,
@@ -3067,13 +3895,55 @@ class GalleryServer:
             logger.error(f"Update photo plan error: {e}", exc_info=True)
             return web.json_response({"error": str(e)}, status=500)
 
+    async def handle_update_outfit_plan(self, request: web.Request):
+        """Update the hairstyle or outfit used by today's pending photo slots."""
+        if not self.on_update_outfit_plan:
+            return web.json_response({"error": "update_unavailable"}, status=503)
+        try:
+            body = await request.json()
+        except Exception:
+            body = {}
+        if not isinstance(body, dict):
+            body = {}
+
+        field = normalize_outfit_plan_field(body.get("field"))
+        if not field:
+            return web.json_response(
+                {"error": "invalid_outfit_field", "message": "只能编辑发型或穿搭"},
+                status=400,
+            )
+        raw_value = str(body.get("value") or "").strip()
+        value = normalize_outfit_plan_value(raw_value)
+        if not value:
+            return web.json_response(
+                {"error": "empty_outfit_value", "message": f"{field}不能为空"},
+                status=400,
+            )
+        if len(raw_value) > MAX_OUTFIT_PLAN_EDIT_LENGTH:
+            return web.json_response(
+                {"error": "outfit_value_too_long", "message": f"{field}内容太长了"},
+                status=400,
+            )
+
+        try:
+            result = self.on_update_outfit_plan(field, value)
+            status = result.get("status") if isinstance(result, dict) else ""
+            if status == "not_found":
+                return web.json_response(result, status=404)
+            if status == "error":
+                return web.json_response(result, status=400)
+            return web.json_response(result)
+        except Exception as e:
+            logger.error("Update outfit plan error: %s", e, exc_info=True)
+            return web.json_response({"error": str(e)}, status=500)
+
     async def handle_photo_job_limit(self, request: web.Request):
         """Read or update the daily dynamic photo-job limit."""
         if request.method == "GET":
             max_daily = self.get_photo_job_limit()
             return web.json_response({
                 "status": "ok",
-                "date": date.today().isoformat(),
+                "date": self._today().isoformat(),
                 "max_daily": max_daily,
                 "min": MIN_PHOTO_JOB_LIMIT,
                 "max": MAX_PHOTO_JOB_LIMIT,
@@ -3087,12 +3957,16 @@ class GalleryServer:
             if self.on_rebuild_photo_jobs:
                 jobs = self.on_rebuild_photo_jobs() or []
             completed_today = self._today_completed_photo_count()
-            active_today = sum(1 for job in jobs if job.get("status") in ("scheduled", "running"))
-            failed_today = sum(1 for job in jobs if job.get("status") == "failed")
+            active_today = sum(
+                1 for job in jobs if job.get("status") in ("scheduled", "running", "sending")
+            )
+            failed_today = sum(
+                1 for job in jobs if job.get("status") in ("failed", "delivery_failed")
+            )
             planned_today = completed_today + len(jobs)
             return web.json_response({
                 "status": "ok",
-                "date": date.today().isoformat(),
+                "date": self._today().isoformat(),
                 "max_daily": limit,
                 "min": MIN_PHOTO_JOB_LIMIT,
                 "max": MAX_PHOTO_JOB_LIMIT,
@@ -3112,7 +3986,7 @@ class GalleryServer:
         if not self.on_refresh_schedule:
             return web.json_response({"error": "no_scheduler"}, status=500)
         try:
-            entry = await self.on_refresh_schedule()
+            entry = await self._refresh_schedule_singleflight()
             if entry and entry.status == "ok":
                 source = getattr(entry, "source", "") or ""
                 if source == "preserved":
@@ -3134,6 +4008,20 @@ class GalleryServer:
             logger.error(f"Refresh schedule error: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
+    async def _refresh_schedule_singleflight(self):
+        """Share one schedule refresh across startup/UI/generate-now callers."""
+        if not self.on_refresh_schedule:
+            return None
+        task = getattr(self, "_schedule_refresh_task", None)
+        if task is None or task.done():
+            task = asyncio.create_task(self.on_refresh_schedule())
+            self._schedule_refresh_task = task
+        try:
+            return await asyncio.shield(task)
+        finally:
+            if task.done() and getattr(self, "_schedule_refresh_task", None) is task:
+                self._schedule_refresh_task = None
+
     async def handle_get_keys(self, request: web.Request):
         """获取 API 密钥配置状态（返回 masked 值）"""
         keys_config = {}
@@ -3149,8 +4037,10 @@ class GalleryServer:
 
         # 读取 plugin_config.json 获取 gitee_config
         plugin_config_path = os.path.join(self.data_dir, "plugin_config.json")
+        plugin_config = {}
         gitee_key = ""
         gitee_fallback_enabled = False
+        gpt_chat_fallback_enabled = False
         if os.path.exists(plugin_config_path):
             try:
                 with open(plugin_config_path, 'r') as f:
@@ -3159,22 +4049,17 @@ class GalleryServer:
                     if gitee_keys:
                         gitee_key = gitee_keys[0]
                     gitee_fallback_enabled = bool(plugin_config.get("gitee_fallback_enabled", False))
+                    gpt_chat_fallback_enabled = bool(
+                        plugin_config.get("gpt_chat_fallback_enabled", False)
+                    )
             except Exception as e:
                 logger.error(f"Load plugin config error: {e}")
+        gitee_key = self._effective_gitee_api_key(plugin_config)
 
-        # 读取 config.yaml 的 LLM 模型链
-        llm_model = ""
-        llm_model_chain = []
-        if self.config_path and os.path.exists(self.config_path):
-            try:
-                import yaml
-                with open(self.config_path, 'r', encoding='utf-8') as f:
-                    full_config = yaml.safe_load(f) or {}
-                full_llm_config = full_config.get("llm", {}) if isinstance(full_config.get("llm"), dict) else {}
-                llm_model_chain = configured_llm_models(full_llm_config)
-                llm_model = llm_model_chain[0] if llm_model_chain else full_llm_config.get("model", "")
-            except Exception as e:
-                logger.error(f"Load config.yaml error: {e}")
+        # self.config already includes data/runtime_config.json overrides.
+        full_llm_config = self.config.get("llm", {}) if isinstance(self.config.get("llm"), dict) else {}
+        llm_model_chain = configured_llm_models(full_llm_config)
+        llm_model = llm_model_chain[0] if llm_model_chain else full_llm_config.get("model", "")
 
         image_config = self.config.get("image_gen", {})
         llm_config = self.config.get("llm", {})
@@ -3190,10 +4075,12 @@ class GalleryServer:
         local_cpa_url = str(keys_config.get("cpa_url", "") or "").strip()
         if local_cpa_url == default_cpa_url:
             local_cpa_url = ""
-        default_gitee_url = str(image_config.get("gitee_url", "") or "").strip()
+        default_gitee_url = str(image_config.get("gitee_url", "") or DEFAULT_GITEE_IMAGE_URL).strip()
         local_gitee_url = str(keys_config.get("gitee_url", "") or "").strip()
         if local_gitee_url == default_gitee_url:
             local_gitee_url = ""
+        effective_gitee_url = self._effective_gitee_image_url(keys_config)
+        effective_gpt_base_url = self._effective_gpt_image_base_url(keys_config)
         default_github_api = self._github_api_url()
         persona = load_runtime_persona(self.config, self.data_dir)
         persona_source = normalize_persona_source(keys_config.get("persona_source"))
@@ -3216,11 +4103,11 @@ class GalleryServer:
         return web.json_response({
             "gallery_title": gallery_title,
             "gitee_key": self._mask_key(gitee_key),
-            "gitee_url": local_gitee_url or default_gitee_url,
+            "gitee_url": effective_gitee_url,
             "gitee_url_local": local_gitee_url,
             "gitee_url_default": default_gitee_url,
             "gpt_key": self._mask_key(keys_config.get("gpt_key", "")),
-            "gpt_base_url": local_gpt_base_url or default_gpt_base_url,
+            "gpt_base_url": effective_gpt_base_url,
             "gpt_base_url_local": local_gpt_base_url,
             "gpt_base_url_default": default_gpt_base_url,
             "gpt_image_endpoints": [
@@ -3264,6 +4151,7 @@ class GalleryServer:
             "llm_models": self.config.get("llm", {}),
             "llm_model_chain": llm_model_chain,
             "gitee_fallback_enabled": gitee_fallback_enabled,
+            "gpt_chat_fallback_enabled": gpt_chat_fallback_enabled,
             "push_channel": push_channel,
             "push_channel_local": normalize_push_channel(local_push_channel_raw) if local_push_channel_raw else "",
             "push_agent": push_agent,
@@ -3665,6 +4553,9 @@ class GalleryServer:
             if meta_entry.get("source") == "hermes_api" or img_file.startswith("hermes_"):
                 normalized["source"] = "hermes_api"
                 source = "hermes_api"
+            meta_model = meta_entry.get("model_name") or meta_entry.get("model")
+            if meta_model and not normalized.get("model_name"):
+                normalized["model_name"] = meta_model
             for field in (
                 "prompt_mode",
                 "pure_prompt",
@@ -3682,6 +4573,10 @@ class GalleryServer:
                 "caption",
                 "display_outfit",
                 "outfit_description",
+                "delivery_status",
+                "delivery_updated_at",
+                "delivery_sent_at",
+                "delivery_error",
             ):
                 if field in meta_entry and (field not in normalized or normalized.get(field) in ("", None)):
                     normalized[field] = meta_entry.get(field)
@@ -3807,36 +4702,23 @@ class GalleryServer:
         return "、".join(keywords[:5])
 
     def _load_image_metadata(self) -> dict:
-        path = os.path.join(self.data_dir, "image_metadata.json")
-        try:
-            if os.path.exists(path):
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                return data if isinstance(data, dict) else {}
-        except Exception as e:
-            logger.error(f"Load image metadata error: {e}")
-        return {}
+        return ImageMetadataStore(self.data_dir).load()
 
     def _save_image_metadata(self, metadata: dict):
-        path = os.path.join(self.data_dir, "image_metadata.json")
-        tmp_path = f"{path}.tmp"
-        with open(tmp_path, "w", encoding="utf-8") as f:
-            json.dump(metadata, f, ensure_ascii=False, indent=2)
-        os.replace(tmp_path, path)
+        """Replace metadata atomically for compatibility with maintenance callers."""
+        ImageMetadataStore(self.data_dir).save(metadata)
 
     def _update_image_metadata_entry(self, filename: str, meta_entry: dict):
         """Atomically merge one metadata entry without clobbering concurrent writes."""
         if not filename:
             raise ValueError("filename_required")
-        lock_path = os.path.join(self.data_dir, ".image_metadata.lock")
-        with open(lock_path, "w") as lf:
-            fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
-            try:
-                metadata = self._load_image_metadata()
-                metadata[filename] = meta_entry
-                self._save_image_metadata(metadata)
-            finally:
-                fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
+        def _merge(metadata):
+            existing = dict(metadata.get(filename) or {})
+            existing.update(meta_entry or {})
+            metadata[filename] = existing
+            return metadata
+
+        ImageMetadataStore(self.data_dir).update(_merge)
 
     def _iter_gallery_image_files(self) -> dict[str, str]:
         files = {}
@@ -3999,7 +4881,7 @@ class GalleryServer:
                     raise OSError("image file missing")
                 date_text, time_text = self._date_time_from_timestamp(int(stat.st_mtime))
             except OSError:
-                date_text = date.today().isoformat()
+                date_text = self._today().isoformat()
                 time_text = ""
 
         prompt = meta.get("prompt", "")
@@ -4087,28 +4969,27 @@ class GalleryServer:
         """保存 API 密钥配置"""
         try:
             body = await request.json()
+            if not isinstance(body, dict):
+                return web.json_response({"error": "invalid_json"}, status=400)
             image_dir_changed = "image_dir" in body
 
-            # 使用 ScheduleStore 的文件锁保护写入
-            store = ScheduleStore(self.data_dir)
-            lock_path = store.lock_path
-
+            lock_path = os.path.join(self.data_dir, ".config.lock")
             with open(lock_path, "w") as lf:
                 fcntl.flock(lf.fileno(), fcntl.LOCK_EX)
                 try:
-                    # 读取现有配置
                     api_keys_path = os.path.join(self.data_dir, "api_keys_config.json")
                     keys_config = {}
                     if os.path.exists(api_keys_path):
-                        with open(api_keys_path, 'r') as f:
+                        with open(api_keys_path, "r", encoding="utf-8") as f:
                             keys_config = json.load(f)
+                        if not isinstance(keys_config, dict):
+                            keys_config = {}
 
                     image_config = self.config.get("image_gen", {}) if isinstance(self.config.get("image_gen"), dict) else {}
                     llm_config = self.config.get("llm", {}) if isinstance(self.config.get("llm"), dict) else {}
                     raw_default_gpt_base_url = str(image_config.get("gpt_base_url", "") or "").strip()
                     default_gpt_base_url = self._configured_image_base_url(raw_default_gpt_base_url)
-                    default_gitee_url = str(image_config.get("gitee_url", "") or "").strip()
-                    default_github_api = self._github_api_url()
+                    default_gitee_url = str(image_config.get("gitee_url", "") or DEFAULT_GITEE_IMAGE_URL).strip()
                     self._drop_redundant_local_url_override(
                         keys_config,
                         "gpt_base_url",
@@ -4127,7 +5008,6 @@ class GalleryServer:
                     )
                     keys_config.pop("github_api", None)
 
-                    # 更新配置（只更新提供的字段）
                     if "gpt_key" in body and body["gpt_key"]:
                         keys_config["gpt_key"] = body["gpt_key"]
                     if "gpt_base_url" in body:
@@ -4160,7 +5040,6 @@ class GalleryServer:
                             body.get("gitee_url"),
                             default_gitee_url,
                         )
-                    # appearance: always update (empty string = remove local appearance)
                     if "appearance" in body:
                         keys_config["appearance"] = body["appearance"]
                     if "persona_source" in body:
@@ -4184,7 +5063,6 @@ class GalleryServer:
                         keys_config["schedule_forbidden_keywords"] = normalize_schedule_forbidden_keywords(
                             body.get("schedule_forbidden_keywords")
                         )
-                    # GitHub proxy is local-only and may be cleared with an empty string.
                     if "github_proxy" in body:
                         keys_config["github_proxy"] = str(body["github_proxy"] or "").strip()
                     if "image_dir" in body:
@@ -4193,6 +5071,10 @@ class GalleryServer:
                             return web.json_response({"error": "图片目录包含非法字符"}, status=400)
                         if image_dir_raw:
                             target_image_dir = normalize_image_dir(image_dir_raw, self.data_dir)
+                            if not self._image_dir_is_allowed(target_image_dir):
+                                return web.json_response({
+                                    "error": "图片目录不在允许范围内；请使用当前图片目录、data 目录，或在 gallery.allowed_image_roots 中显式配置"
+                                }, status=400)
                             if os.path.exists(target_image_dir) and not os.path.isdir(target_image_dir):
                                 return web.json_response({"error": "图片存放位置不是文件夹"}, status=400)
                             os.makedirs(target_image_dir, exist_ok=True)
@@ -4202,16 +5084,24 @@ class GalleryServer:
 
                     if self._body_bool(body, "validate_required_config"):
                         plugin_config = self._load_plugin_config()
-                        gitee_keys = plugin_config.get("gitee_config", {}).get("api_keys", [])
-                        existing_gitee_key = str((gitee_keys[0] if gitee_keys else "") or "").strip()
+                        effective_gitee_key = self._effective_gitee_api_key(
+                            plugin_config,
+                            local_override=body.get("gitee_key", ""),
+                        )
+                        effective_gitee_url = self._effective_gitee_image_url(keys_config)
+                        effective_gpt_base_url = self._effective_gpt_image_base_url(keys_config)
+                        effective_cpa_url = (
+                            str(keys_config.get("cpa_url", "") or "").strip()
+                            or os.environ.get("CPA_BASE_URL", "").strip()
+                            or str(llm_config.get("base_url", "") or "").strip()
+                        )
                         required_fields = [
-                            ("Gitee API URL", keys_config.get("gitee_url")),
-                            ("Gitee API Key", body.get("gitee_key") or existing_gitee_key),
-                            ("GPT Image Base URL", keys_config.get("gpt_base_url")),
+                            ("Gitee API URL", effective_gitee_url),
+                            ("Gitee API Key", effective_gitee_key),
+                            ("GPT Image Base URL", effective_gpt_base_url),
                             ("GPT Image Key", body.get("gpt_key") or keys_config.get("gpt_key")),
-                            ("CPA Base URL", keys_config.get("cpa_url")),
+                            ("CPA Base URL", effective_cpa_url),
                             ("CPA API Key", body.get("cpa_key") or keys_config.get("cpa_key")),
-                            ("GitHub API 代理", keys_config.get("github_proxy")),
                         ]
                         missing = [label for label, value in required_fields if not str(value or "").strip()]
                         if missing:
@@ -4221,92 +5111,115 @@ class GalleryServer:
                                 "missing": missing,
                             }, status=400)
 
-                    # 写入 api_keys_config.json
-                    with open(api_keys_path, 'w', encoding='utf-8') as f:
-                        json.dump(keys_config, f, ensure_ascii=False, indent=2)
-
-                    # 更新 plugin_config.json 的 Gitee 配置
-                    if "gitee_key" in body or "gitee_fallback_enabled" in body:
-                        plugin_config_path = os.path.join(self.data_dir, "plugin_config.json")
+                    plugin_config_path = os.path.join(self.data_dir, "plugin_config.json")
+                    plugin_config = None
+                    plugin_changed = (
+                        "gitee_key" in body
+                        or "gitee_fallback_enabled" in body
+                        or "gpt_chat_fallback_enabled" in body
+                    )
+                    if plugin_changed:
                         plugin_config = {}
                         if os.path.exists(plugin_config_path):
-                            with open(plugin_config_path, 'r') as f:
+                            with open(plugin_config_path, "r", encoding="utf-8") as f:
                                 plugin_config = json.load(f)
+                            if not isinstance(plugin_config, dict):
+                                plugin_config = {}
 
                         if "gitee_fallback_enabled" in body:
-                            plugin_config["gitee_fallback_enabled"] = bool(body["gitee_fallback_enabled"])
+                            plugin_config["gitee_fallback_enabled"] = self._body_bool(
+                                body, "gitee_fallback_enabled"
+                            )
+                        if "gpt_chat_fallback_enabled" in body:
+                            plugin_config["gpt_chat_fallback_enabled"] = self._body_bool(
+                                body, "gpt_chat_fallback_enabled"
+                            )
 
                         if body.get("gitee_key"):
-                            if "gitee_config" not in plugin_config:
-                                plugin_config["gitee_config"] = {}
-                            if "api_keys" not in plugin_config["gitee_config"]:
-                                plugin_config["gitee_config"]["api_keys"] = []
-
-                            # 更新或添加第一个 key
-                            if plugin_config["gitee_config"]["api_keys"]:
-                                plugin_config["gitee_config"]["api_keys"][0] = body["gitee_key"]
+                            gitee_config = plugin_config.get("gitee_config")
+                            if not isinstance(gitee_config, dict):
+                                gitee_config = {}
+                                plugin_config["gitee_config"] = gitee_config
+                            api_keys = gitee_config.get("api_keys")
+                            if not isinstance(api_keys, list):
+                                api_keys = []
+                                gitee_config["api_keys"] = api_keys
+                            if api_keys:
+                                api_keys[0] = body["gitee_key"]
                             else:
-                                plugin_config["gitee_config"]["api_keys"].append(body["gitee_key"])
+                                api_keys.append(body["gitee_key"])
 
-                        with open(plugin_config_path, 'w', encoding='utf-8') as f:
-                            json.dump(plugin_config, f, ensure_ascii=False, indent=2)
+                    llm_changed = "llm_model" in body or "llm_models" in body
+                    integration_keys = [
+                        key for key in ("hermes_cli", "openclaw_cli") if key in body
+                    ]
+                    config_changed = llm_changed or bool(integration_keys)
+                    runtime_path = runtime_config_path(self.data_dir)
+                    runtime_config = {}
+                    if config_changed:
+                        if os.path.exists(runtime_path):
+                            with open(runtime_path, "r", encoding="utf-8") as f:
+                                runtime_config = normalize_runtime_config(json.load(f) or {})
+
+                        if llm_changed:
+                            if not isinstance(runtime_config.get("llm"), dict):
+                                runtime_config["llm"] = {}
+                            raw_llm_models = body.get("llm_models", [])
+                            if isinstance(raw_llm_models, dict):
+                                requested_models = configured_llm_models(raw_llm_models)
+                            elif isinstance(raw_llm_models, (list, tuple)):
+                                requested_models = raw_llm_models
+                            else:
+                                requested_models = []
+                            requested_chain = normalize_llm_models(
+                                body.get("llm_model", ""),
+                                requested_models,
+                            )
+                            runtime_config["llm"]["models"] = requested_chain
+                            runtime_config["llm"]["model"] = requested_chain[0] if requested_chain else ""
+                            runtime_config["llm"]["fallback_model"] = (
+                                requested_chain[1] if len(requested_chain) > 1 else ""
+                            )
+
+                        if integration_keys:
+                            if not isinstance(runtime_config.get("integrations"), dict):
+                                runtime_config["integrations"] = {}
+                            for key in integration_keys:
+                                value = str(body.get(key) or "").strip()
+                                runtime_config["integrations"][key] = value
+
+                    pending_files = [(
+                        api_keys_path,
+                        json.dumps(keys_config, ensure_ascii=False, indent=2) + "\n",
+                    )]
+                    if plugin_changed:
+                        pending_files.append((
+                            plugin_config_path,
+                            json.dumps(plugin_config, ensure_ascii=False, indent=2) + "\n",
+                        ))
+                    if config_changed:
+                        pending_files.append((
+                            runtime_path,
+                            json.dumps(runtime_config, ensure_ascii=False, indent=2) + "\n",
+                        ))
+
+                    self._atomic_replace_text_files(pending_files)
+
+                    if llm_changed:
+                        current_llm = dict(self.config.get("llm") or {})
+                        current_llm.update(runtime_config["llm"])
+                        self.config["llm"] = current_llm
+                        logger.info(
+                            "LLM model chain updated to: %s",
+                            ", ".join(current_llm.get("models") or []) or "(empty)",
+                        )
+                    if integration_keys:
+                        current_integrations = dict(self.config.get("integrations") or {})
+                        current_integrations.update(runtime_config["integrations"])
+                        self.config["integrations"] = current_integrations
+                        logger.info("Integrations updated: %s", integration_keys)
                 finally:
                     fcntl.flock(lf.fileno(), fcntl.LOCK_UN)
-
-            # 保存 LLM 模型链到 config.yaml
-            if (
-                ("llm_model" in body or "llm_models" in body)
-                and self.config_path
-                and os.path.exists(self.config_path)
-            ):
-                try:
-                    import yaml
-                    with open(self.config_path, 'r', encoding='utf-8') as f:
-                        full_config = yaml.safe_load(f) or {}
-                    if "llm" not in full_config or not isinstance(full_config.get("llm"), dict):
-                        full_config["llm"] = {}
-                    raw_llm_models = body.get("llm_models", [])
-                    if isinstance(raw_llm_models, dict):
-                        requested_models = configured_llm_models(raw_llm_models)
-                    elif isinstance(raw_llm_models, (list, tuple)):
-                        requested_models = raw_llm_models
-                    else:
-                        requested_models = []
-                    requested_chain = normalize_llm_models(
-                        body.get("llm_model", ""),
-                        requested_models,
-                    )
-                    full_config["llm"]["models"] = requested_chain
-                    full_config["llm"]["model"] = requested_chain[0] if requested_chain else ""
-                    full_config["llm"]["fallback_model"] = requested_chain[1] if len(requested_chain) > 1 else ""
-                    with open(self.config_path, 'w', encoding='utf-8') as f:
-                        yaml.dump(full_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-                    # 更新内存中的 config
-                    self.config["llm"] = full_config["llm"]
-                    logger.info("LLM model chain updated to: %s", ", ".join(requested_chain) or "(empty)")
-                except Exception as e:
-                    logger.error(f"Save llm models error: {e}")
-
-            hermes_or_openclaw_keys = [key for key in ("hermes_cli", "openclaw_cli") if key in body]
-            if hermes_or_openclaw_keys and self.config_path and os.path.exists(self.config_path):
-                try:
-                    import yaml
-                    with open(self.config_path, 'r', encoding='utf-8') as f:
-                        full_config = yaml.safe_load(f) or {}
-                    if "integrations" not in full_config or not isinstance(full_config.get("integrations"), dict):
-                        full_config["integrations"] = {}
-                    for key in hermes_or_openclaw_keys:
-                        value = str(body.get(key) or "").strip()
-                        if value:
-                            full_config["integrations"][key] = value
-                        else:
-                            full_config["integrations"].pop(key, None)
-                    with open(self.config_path, 'w', encoding='utf-8') as f:
-                        yaml.dump(full_config, f, default_flow_style=False, allow_unicode=True, sort_keys=False)
-                    self.config["integrations"] = full_config["integrations"]
-                    logger.info("Integrations updated: %s", hermes_or_openclaw_keys)
-                except Exception as e:
-                    logger.error(f"Save integrations error: {e}")
 
             if image_dir_changed:
                 self._set_runtime_image_dir(self._resolve_image_dir())
@@ -4642,7 +5555,7 @@ class GalleryServer:
 
     async def handle_today(self, request: web.Request):
         """获取今日数据 - 返回今日所有照片 + 日程信息"""
-        today_str = date.today().isoformat()
+        today_str = self._today().isoformat()
         try:
             store = ScheduleStore(self.data_dir)
             all_data = store.load()
@@ -4719,7 +5632,7 @@ class GalleryServer:
 
     async def handle_schedule_detail(self, request: web.Request):
         """返回今日日程详情（彩蛋弹窗用）"""
-        today_str = date.today().isoformat()
+        today_str = self._today().isoformat()
         try:
             store = ScheduleStore(self.data_dir)
             all_data = store.load()
@@ -4948,6 +5861,50 @@ class GalleryServer:
             return ext
         return REFERENCE_MIME_EXTENSIONS.get((content_type or "").split(";")[0].strip().lower(), "")
 
+    @staticmethod
+    def _verify_reference_image(path: str) -> None:
+        """Validate decoded image content before it can be persisted or analyzed."""
+        with Image.open(path) as image:
+            image.verify()
+        with Image.open(path) as image:
+            width, height = image.size
+            if width <= 0 or height <= 0 or width * height > MAX_REFERENCE_IMAGE_PIXELS:
+                raise ValueError("invalid_image_dimensions")
+
+    @staticmethod
+    def _default_reference_upload_spec(style: str) -> dict:
+        normalized_style = str(style or "").strip().lower()
+        if normalized_style not in CUSTOM_DEFAULT_REFERENCE_STYLES:
+            return {}
+        for filename, info in BUILTIN_REFERENCE_MAP.items():
+            if str(info.get("style") or "").strip().lower() == normalized_style:
+                return {
+                    "filename": filename,
+                    "style": normalized_style,
+                    "label": info.get("label", ""),
+                    "prompt": info.get("prompt", ""),
+                }
+        return {}
+
+    @staticmethod
+    def _write_default_reference_image(source_path: str, target_path: str) -> None:
+        target_tmp = f"{target_path}.{uuid.uuid4().hex}.tmp"
+        try:
+            with Image.open(source_path) as source:
+                source.seek(0)
+                image = ImageOps.exif_transpose(source)
+                if image.mode in ("RGBA", "LA") or "transparency" in image.info:
+                    rgba = image.convert("RGBA")
+                    normalized = Image.new("RGB", rgba.size, "white")
+                    normalized.paste(rgba, mask=rgba.getchannel("A"))
+                else:
+                    normalized = image.convert("RGB")
+                normalized.save(target_tmp, format="JPEG", quality=95, optimize=True)
+            os.replace(target_tmp, target_path)
+        finally:
+            if os.path.exists(target_tmp):
+                os.remove(target_tmp)
+
     def _reference_profiles(self) -> list[dict]:
         return load_reference_profiles(
             self.data_dir,
@@ -4980,6 +5937,89 @@ class GalleryServer:
         result["selection_reason"] = selected.get("selection_reason", "")
         result["random_fallback"] = bool(selected.get("random_fallback"))
         return result
+
+    def _reference_profile_result(
+        self,
+        profile: dict,
+        selection_mode: str = "",
+        selection_reason: str = "",
+    ) -> dict:
+        path = resolve_reference_profile_path(profile, self.reference_dir, self.app_reference_dir)
+        if not path:
+            return {}
+        result = reference_profile_response(profile)
+        result["path"] = path
+        try:
+            version = os.stat(path).st_mtime_ns
+        except OSError:
+            version = 0
+        url = str(result.get("url") or "").strip()
+        if url and version:
+            separator = "&" if "?" in url else "?"
+            result["url"] = f"{url}{separator}v={version}"
+            result["version"] = version
+        if selection_mode:
+            result["selection_mode"] = selection_mode
+        if selection_reason:
+            result["selection_reason"] = selection_reason
+        return result
+
+    def _reference_profile_for_value(self, value: str) -> dict:
+        ref_name = self._reference_basename(value)
+        raw_value = str(value or "").strip()
+        if not ref_name and not raw_value:
+            return {}
+        for profile in self._reference_profiles():
+            result = self._reference_profile_result(profile)
+            if not result:
+                continue
+            candidates = {
+                self._reference_basename(result.get("filename", "")),
+                self._reference_basename(result.get("url", "")),
+                self._reference_basename(result.get("path", "")),
+            }
+            if ref_name and ref_name in candidates:
+                return result
+            if raw_value and raw_value in {result.get("url", ""), result.get("path", "")}:
+                return result
+        return {}
+
+    def _select_default_custom_reference_sync(self) -> dict:
+        profiles = [
+            profile
+            for profile in self._reference_profiles()
+            if profile.get("active") is not False
+        ]
+        default_style_refs = []
+        for profile in profiles:
+            if profile.get("source") != "default" or not profile.get("builtin"):
+                continue
+            if str(profile.get("style") or "").strip().lower() not in CUSTOM_DEFAULT_REFERENCE_STYLES:
+                continue
+            result = self._reference_profile_result(
+                profile,
+                selection_mode="custom_default_style",
+                selection_reason="自定义生图默认从三种风格底模中随机选取",
+            )
+            if result:
+                default_style_refs.append(result)
+        if default_style_refs:
+            return random.choice(default_style_refs)
+
+        existing_refs = []
+        for profile in profiles:
+            if profile.get("source") == "default":
+                continue
+            result = self._reference_profile_result(
+                profile,
+                selection_mode="custom_random_reference",
+                selection_reason="三种风格底模不可用，随机选取已有参考像",
+            )
+            if result:
+                existing_refs.append(result)
+        if existing_refs:
+            return random.choice(existing_refs)
+        return {}
 
     def _iter_uploaded_refs(self) -> list[dict]:
         refs = []
@@ -5099,52 +6139,131 @@ class GalleryServer:
 
     async def handle_ref_list(self, request: web.Request):
         """返回参考图列表（内置底模 + 用户上传）"""
-        refs = [
-            reference_profile_response(profile)
-            for profile in self._reference_profiles()
-            if profile.get("source") != "wardrobe"
-        ]
+        refs = []
+        for profile in self._reference_profiles():
+            if profile.get("source") == "wardrobe":
+                continue
+            result = self._reference_profile_result(profile)
+            if result:
+                result.pop("path", None)
+                refs.append(result)
         refs.extend(self._iter_wardrobe_refs())
         return web.json_response(refs)
 
     async def handle_uploaded_refs(self, request: web.Request):
         """列出已上传的自定义参考图"""
         try:
-            refs = [
-                reference_profile_response(profile)
-                for profile in self._reference_profiles()
-                if profile.get("source") == "upload"
-            ]
+            refs = []
+            for profile in self._reference_profiles():
+                if profile.get("source") != "upload":
+                    continue
+                result = self._reference_profile_result(profile)
+                if result:
+                    result.pop("path", None)
+                    refs.append(result)
             return web.json_response(refs)
         except Exception as e:
             logger.error(f"List uploaded refs error: {e}")
             return web.json_response([])
 
     async def handle_upload_ref(self, request: web.Request):
-        """上传自定义参考图到 data/references/uploads 持久化目录"""
-        reader = await request.multipart()
-        field = await reader.next()
-        if not field or not field.filename:
-            return web.json_response({"error": "no_file"}, status=400)
-
-        ext = self._reference_ext(field.filename, field.headers.get("Content-Type", ""))
-        if not ext:
-            return web.json_response({"error": "invalid_image_type"}, status=400)
-
-        save_name = f"upload_{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
-        save_path = os.path.join(self.uploaded_reference_dir, save_name)
-
+        """上传普通参考图，或按 style 替换固定默认底模。"""
+        temp_path = ""
+        original_filename = ""
+        content_type = ""
+        style = ""
         try:
-            with open(save_path, "wb") as f:
-                while True:
-                    chunk = await field.read_chunk()
-                    if not chunk:
-                        break
-                    f.write(chunk)
-        except Exception:
-            if os.path.exists(save_path):
-                os.remove(save_path)
-            raise
+            if (
+                request.content_length is not None
+                and request.content_length
+                > MAX_REFERENCE_UPLOAD_BYTES + MAX_REFERENCE_MULTIPART_OVERHEAD_BYTES
+            ):
+                return web.json_response({"error": "image_too_large"}, status=413)
+            reader = await request.multipart()
+            while True:
+                field = await reader.next()
+                if field is None:
+                    break
+                if field.name == "style" and not field.filename:
+                    style_chunks = []
+                    style_size = 0
+                    while True:
+                        chunk = await field.read_chunk()
+                        if not chunk:
+                            break
+                        style_size += len(chunk)
+                        if style_size > MAX_REFERENCE_STYLE_BYTES:
+                            return web.json_response({"error": "invalid_style"}, status=400)
+                        style_chunks.append(chunk)
+                    style = b"".join(style_chunks).decode("utf-8", errors="ignore").strip().lower()
+                    continue
+                if not field.filename or temp_path:
+                    return web.json_response({"error": "invalid_upload_form"}, status=400)
+
+                original_filename = field.filename
+                content_type = field.headers.get("Content-Type", "")
+                ext = self._reference_ext(original_filename, content_type)
+                if not ext:
+                    return web.json_response({"error": "invalid_image_type"}, status=400)
+                temp_path = os.path.join(
+                    self.uploaded_reference_dir,
+                    f".reference_upload_{uuid.uuid4().hex}{ext}",
+                )
+                uploaded_bytes = 0
+                with open(temp_path, "wb") as f:
+                    while True:
+                        chunk = await field.read_chunk()
+                        if not chunk:
+                            break
+                        uploaded_bytes += len(chunk)
+                        if uploaded_bytes > MAX_REFERENCE_UPLOAD_BYTES:
+                            return web.json_response({"error": "image_too_large"}, status=413)
+                        f.write(chunk)
+
+            if not temp_path:
+                return web.json_response({"error": "no_file"}, status=400)
+
+            try:
+                self._verify_reference_image(temp_path)
+            except (Image.DecompressionBombError, UnidentifiedImageError, OSError, ValueError):
+                return web.json_response({"error": "invalid_image"}, status=400)
+
+            if style:
+                spec = self._default_reference_upload_spec(style)
+                if not spec:
+                    return web.json_response({"error": "invalid_style"}, status=400)
+                save_name = spec["filename"]
+                save_path = os.path.join(self.reference_dir, save_name)
+                try:
+                    self._write_default_reference_image(temp_path, save_path)
+                except (UnidentifiedImageError, OSError, ValueError):
+                    return web.json_response({"error": "invalid_image"}, status=400)
+
+                profile = upsert_reference_profile(self.data_dir, {
+                    "filename": save_name,
+                    "url": f"/local-refs/{save_name}",
+                    "label": spec["label"],
+                    "style": spec["style"],
+                    "prompt": spec["prompt"],
+                    "tags": [spec["style"], spec["label"]],
+                    "source": "default",
+                    "builtin": True,
+                    "active": True,
+                    "analysis_status": "uploaded",
+                    "analysis_error": "",
+                })
+                result = self._reference_profile_result(profile)
+                result.pop("path", None)
+                return web.json_response(result or reference_profile_response(profile))
+
+            ext = self._reference_ext(original_filename, content_type)
+            save_name = f"upload_{int(time.time())}_{uuid.uuid4().hex[:8]}{ext}"
+            save_path = os.path.join(self.uploaded_reference_dir, save_name)
+            os.replace(temp_path, save_path)
+            temp_path = ""
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                os.remove(temp_path)
 
         loop = asyncio.get_running_loop()
         analysis = await loop.run_in_executor(
@@ -5194,9 +6313,37 @@ class GalleryServer:
             logger.error(f"Delete uploaded ref error: {e}")
             return web.json_response({"error": str(e)}, status=500)
 
-    def _entry_sort_key(self, entry):
-        """Sort key: date desc, then time desc."""
-        return (entry.get("date", ""), entry.get("time", ""))
+    @staticmethod
+    def _entry_sort_key(entry):
+        """Stable sort key: date desc, time desc, then filename desc."""
+        return (
+            str(entry.get("date") or ""),
+            str(entry.get("time") or ""),
+            str(entry.get("image_filename") or entry.get("id") or ""),
+        )
+
+    @classmethod
+    def _gallery_cursor_for_entry(cls, entry: dict) -> str:
+        payload = json.dumps(
+            list(cls._entry_sort_key(entry)),
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        return base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+
+    @staticmethod
+    def _gallery_cursor_key(cursor: str) -> tuple[str, str, str]:
+        raw = str(cursor or "").strip()
+        if not raw:
+            return ("", "", "")
+        try:
+            payload = base64.urlsafe_b64decode(raw + "=" * (-len(raw) % 4))
+            decoded = json.loads(payload.decode("utf-8"))
+        except Exception as exc:
+            raise ValueError("invalid_cursor") from exc
+        if not isinstance(decoded, list) or len(decoded) != 3:
+            raise ValueError("invalid_cursor")
+        return tuple(str(value or "") for value in decoded)
 
     @staticmethod
     def _normalize_api_source(*values) -> str:
@@ -5574,16 +6721,127 @@ class GalleryServer:
             return translated
         return self._fallback_hermes_display_description(prompt, mode_label)
 
+    @staticmethod
+    def _gallery_style_label(entry: dict) -> str:
+        raw_style = str((entry or {}).get("outfit_style") or "").strip()
+        if raw_style.lower() in GALLERY_BASE_MODEL_STYLES:
+            return "自定义"
+        return raw_style
+
+    @classmethod
+    def _gallery_entry_matches_style(cls, entry: dict, requested_style: str) -> bool:
+        needle = str(requested_style or "").strip().lstrip("#").casefold()
+        if not needle:
+            return True
+        raw_style = str((entry or {}).get("outfit_style") or "").strip()
+        display_style = cls._gallery_style_label(entry)
+        if raw_style.casefold() == needle or display_style.casefold() == needle:
+            return True
+        caption = str((entry or {}).get("caption") or "")
+        return any(
+            tag.casefold() == needle or tag.lstrip("#").casefold() == needle
+            for tag in re.findall(r"#[^\s#]+", caption)
+        )
+
     async def handle_gallery(self, request: web.Request):
-        """获取所有画廊条目"""
-        entries = self._load_all_entries()
-        # 支持收藏过滤
+        """Return a legacy full list or a cursor-paginated gallery page."""
+        all_entries = self._load_all_entries()
+        total_all = len(all_entries)
+        favorite_total = sum(1 for entry in all_entries if entry.get("favorite") is True)
+        styles = sorted({
+            label
+            for entry in all_entries
+            for label in (self._gallery_style_label(entry),)
+            if label
+        }, key=str.casefold)
+        entries = list(all_entries)
         favorites_only = request.query.get("favorites", "").lower() == "true"
         if favorites_only:
             entries = [e for e in entries if e.get("favorite")]
-        # 按日期+时间倒序
+        requested_style = str(request.query.get("style") or "").strip().lstrip("#")[:80]
+        if requested_style:
+            entries = [
+                entry
+                for entry in entries
+                if self._gallery_entry_matches_style(entry, requested_style)
+            ]
         entries.sort(key=lambda e: self._entry_sort_key(e), reverse=True)
-        return web.json_response(entries)
+
+        paginated = any(
+            key in request.query
+            for key in ("limit", "cursor", "include_prompt", "style")
+        )
+        if not paginated:
+            return web.json_response(entries)
+
+        try:
+            limit = int(request.query.get("limit", "48"))
+        except (TypeError, ValueError):
+            return web.json_response({"error": "invalid_pagination"}, status=400)
+        limit = max(1, min(limit, 100))
+        cursor_text = str(request.query.get("cursor") or "").strip()
+        remaining_entries = entries
+        if cursor_text:
+            try:
+                cursor_key = self._gallery_cursor_key(cursor_text)
+            except ValueError:
+                return web.json_response({"error": "invalid_cursor"}, status=400)
+            remaining_entries = [
+                entry
+                for entry in entries
+                if self._entry_sort_key(entry) < cursor_key
+            ]
+        include_prompt = str(request.query.get("include_prompt", "false")).lower() in {
+            "1", "true", "yes", "on",
+        }
+        page = []
+        for entry in remaining_entries[:limit]:
+            payload = dict(entry)
+            prompt = str(payload.get("prompt") or "")
+            payload["has_prompt"] = bool(prompt)
+            if not include_prompt:
+                payload.pop("prompt", None)
+            page.append(payload)
+        has_more = len(remaining_entries) > len(page)
+        next_cursor = self._gallery_cursor_for_entry(page[-1]) if has_more and page else ""
+        return web.json_response({
+            "items": page,
+            "total": len(entries),
+            "total_all": total_all,
+            "favorite_total": favorite_total,
+            "styles": styles,
+            "style": requested_style,
+            "limit": limit,
+            "cursor": cursor_text,
+            "next_cursor": next_cursor,
+            "has_more": has_more,
+        })
+
+    async def handle_image_detail(self, request: web.Request):
+        """Return the full stored payload for one registered gallery image."""
+        try:
+            img_id = self._normalize_gallery_image_filename(
+                request.match_info.get("img_id", "")
+            )
+        except ValueError:
+            return web.json_response({"error": "invalid_filename"}, status=400)
+        if img_id not in self._registered_image_filenames() or not self._image_exists(img_id):
+            return web.json_response({"error": "not_found"}, status=404)
+
+        metadata = self._load_image_metadata()
+        entry = self._gallery_entry_for_image(img_id)
+        if entry:
+            payload = self._enrich_photo_schedule_time(entry, metadata)
+        else:
+            meta = metadata.get(img_id)
+            if not isinstance(meta, dict):
+                return web.json_response({"error": "not_found"}, status=404)
+            payload = self._normalize_entry_display(
+                self._metadata_gallery_entry(img_id, meta),
+                metadata,
+            )
+        payload["has_prompt"] = bool(str(payload.get("prompt") or ""))
+        return web.json_response(payload)
 
     async def handle_keyword_cloud(self, request: web.Request):
         """Return high-frequency keywords from historical image-generation calls."""
@@ -6130,6 +7388,76 @@ class GalleryServer:
         text = re.sub(r"\s+", " ", text).strip()
         return text[:limit].rstrip()
 
+    def _set_group_chat_reply_progress(
+        self,
+        room_id: str,
+        phase: str,
+        character_id: str = "",
+        character_name: str = "",
+        token: str = "",
+    ) -> str:
+        clean_room_id = str(room_id or "").strip()
+        if not clean_room_id:
+            return ""
+        clean_token = str(token or "").strip() or uuid.uuid4().hex
+        clean_phase = "image" if str(phase or "").strip().lower() == "image" else "typing"
+        now = self._now().isoformat(timespec="seconds")
+        current = self._group_chat_reply_progress.get(clean_room_id) or {}
+        started_at = current.get("started_at") if current.get("_token") == clean_token else ""
+        self._group_chat_reply_progress[clean_room_id] = {
+            "_token": clean_token,
+            "phase": clean_phase,
+            "character_id": str(character_id or "").strip(),
+            "character_name": str(character_name or "").strip(),
+            "started_at": started_at or now,
+            "updated_at": now,
+        }
+        return clean_token
+
+    def _clear_group_chat_reply_progress(self, room_id: str, token: str = "") -> None:
+        clean_room_id = str(room_id or "").strip()
+        current = self._group_chat_reply_progress.get(clean_room_id)
+        if not current:
+            return
+        clean_token = str(token or "").strip()
+        if clean_token and current.get("_token") != clean_token:
+            return
+        self._group_chat_reply_progress.pop(clean_room_id, None)
+
+    def _public_group_chat_reply_progress(self, room_id: str) -> Optional[dict]:
+        progress = self._group_chat_reply_progress.get(str(room_id or "").strip())
+        if not progress:
+            return None
+        return {
+            key: value
+            for key, value in progress.items()
+            if not str(key).startswith("_")
+        }
+
+    def _track_group_chat_background_task(self, task: asyncio.Task) -> asyncio.Task:
+        self._group_chat_background_tasks.add(task)
+
+        def _done(completed: asyncio.Task) -> None:
+            self._group_chat_background_tasks.discard(completed)
+            if completed.cancelled():
+                return
+            try:
+                completed.exception()
+            except asyncio.CancelledError:
+                return
+
+        task.add_done_callback(_done)
+        return task
+
+    async def _cleanup_group_chat_background_tasks(self, _app) -> None:
+        tasks = [task for task in self._group_chat_background_tasks if not task.done()]
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._group_chat_background_tasks.clear()
+        self._group_chat_reply_progress.clear()
+
     @staticmethod
     def _group_chat_normalized_placeholder_text(value: str) -> str:
         return re.sub(r"[\s\"'“”‘’`，,。.!！?？:：]+", "", str(value or "")).strip()
@@ -6199,6 +7527,8 @@ class GalleryServer:
             "style、size、character_ids（合照时填写参与角色 id）。\n"
             "当用户明确要求看照片/图片/自拍/合照，或角色自己说要拍照、发照片、给大家看时，必须使用 image_request；不要只口头说会去拍。\n"
             "image_request.prompt 要描述可直接生成的画面：场景、动作、表情、穿搭、氛围和构图，不要写成聊天句子。\n"
+            "image_request.prompt 里的所有人物必须明确为 21 岁以上成年人，并保持非色情的日常摄影表达；"
+            "不要写 18 岁、未成年、学生或校服身份、性化身材或诱惑性描述，可改写为成年时尚造型。\n"
             "如果只是普通聊天，image_request 必须为 null。\n"
             "回复要自然、像即时聊天，通常 1 到 3 句；可以接住最近一条消息，也可以主动延展话题。\n"
             f"群聊参与者：{('、'.join(participant_names) or '未配置')}\n"
@@ -6618,6 +7948,84 @@ class GalleryServer:
         )
         return self._public_group_message(message), message
 
+    async def _run_group_chat_image_task(
+        self,
+        progress_token: str,
+        room_id: str,
+        room: dict,
+        character: dict,
+        body: dict,
+        image_request: dict,
+        reply_text: str,
+        used_model: str,
+        preferred_model: str,
+        trigger_message_id: str,
+        rewind_message_id: str,
+        parent_message_id: str = "",
+    ) -> tuple[dict, dict]:
+        character_id = str(character.get("id") or "").strip()
+        try:
+            return await self._generate_group_chat_image_message(
+                room_id,
+                room,
+                character,
+                body,
+                image_request,
+                reply_text,
+                used_model,
+                preferred_model,
+                trigger_message_id,
+                rewind_message_id,
+                parent_message_id,
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:
+            logger.warning(
+                "Group chat image tool call failed: room=%s character=%s err=%s",
+                room_id,
+                character_id,
+                e,
+            )
+            raise
+        finally:
+            self._clear_group_chat_reply_progress(room_id, progress_token)
+
+    def _start_group_chat_image_task(
+        self,
+        progress_token: str,
+        room_id: str,
+        room: dict,
+        character: dict,
+        body: dict,
+        image_request: dict,
+        reply_text: str,
+        used_model: str,
+        preferred_model: str,
+        trigger_message_id: str,
+        rewind_message_id: str,
+        parent_message_id: str = "",
+    ) -> asyncio.Task:
+        character_id = str(character.get("id") or "").strip() or "character"
+        task = asyncio.create_task(
+            self._run_group_chat_image_task(
+                progress_token,
+                room_id,
+                room,
+                character,
+                body,
+                image_request,
+                reply_text,
+                used_model,
+                preferred_model,
+                trigger_message_id,
+                rewind_message_id,
+                parent_message_id,
+            ),
+            name=f"group-chat-image:{room_id}:{character_id}",
+        )
+        return self._track_group_chat_background_task(task)
+
     async def _call_group_chat_llm(
         self,
         prompt: str,
@@ -6818,6 +8226,7 @@ class GalleryServer:
         public_room["message_count"] = len(messages)
         public_room["hermes_bridge"] = payload.get("hermes_bridge", {})
         public_room["title"] = public_room.get("name", "")
+        public_room["reply_progress"] = self._public_group_chat_reply_progress(room_id)
         return public_room
 
     async def handle_group_chat_rooms(self, request: web.Request):
@@ -6979,12 +8388,48 @@ class GalleryServer:
             if request.method.upper() != "DELETE":
                 return web.json_response({"error": "method_not_allowed"}, status=405)
             result = self.group_chat_store.delete_message(room_id, message_id)
+            deleted_message = result.get("message", {})
+            metadata = deleted_message.get("metadata") if isinstance(deleted_message, dict) else {}
+            raw_image_filename = (
+                metadata.get("image_filename")
+                if isinstance(metadata, dict)
+                else ""
+            )
+            image_filename = ""
+            gallery_cleanup = {}
+            gallery_error = ""
+            if raw_image_filename:
+                try:
+                    image_filename = self._normalize_gallery_image_filename(raw_image_filename)
+                    gallery_cleanup = self._delete_gallery_image(image_filename)
+                except ValueError as e:
+                    gallery_error = str(e) or "invalid_filename"
+                    logger.warning(
+                        "Skip invalid group chat image cleanup: room=%s message=%s filename=%r",
+                        room_id,
+                        message_id,
+                        raw_image_filename,
+                    )
+                except Exception as e:
+                    gallery_error = str(e) or "gallery_delete_failed"
+                    logger.error(
+                        "Group chat gallery image cleanup failed: room=%s message=%s filename=%r err=%s",
+                        room_id,
+                        message_id,
+                        raw_image_filename,
+                        e,
+                        exc_info=True,
+                    )
             payload = self.group_chat_store.room_payload(room_id, message_limit=50)
             public_room = self._public_group_room_payload((payload or {}).get("room") or {}, message_limit=50) if payload else None
             return web.json_response({
                 "success": True,
-                "message": self._public_group_message(result.get("message", {})),
+                "message": self._public_group_message(deleted_message),
                 "removed_count": result.get("removed_count", 0),
+                "image_filename": image_filename,
+                "gallery_deleted": bool(gallery_cleanup) and not gallery_cleanup.get("errors"),
+                "gallery_cleanup": gallery_cleanup,
+                "gallery_error": gallery_error,
                 "room": public_room,
                 "room_payload": payload,
             })
@@ -7001,6 +8446,21 @@ class GalleryServer:
     async def handle_group_chat_reply(self, request: web.Request):
         """Generate LLM-backed replies for enabled participants in a room."""
         room_id = request.match_info.get("room_id", "")
+        rewind_snapshot: list[dict] = []
+        rewind_generated_ids: set[str] = set()
+        rewind_restored = False
+
+        def restore_rewind_snapshot() -> None:
+            nonlocal rewind_restored
+            if rewind_restored or not rewind_snapshot:
+                return
+            self.group_chat_store.restore_messages(
+                room_id,
+                rewind_snapshot,
+                discard_message_ids=rewind_generated_ids,
+            )
+            rewind_restored = True
+
         try:
             try:
                 body = await request.json()
@@ -7022,6 +8482,9 @@ class GalleryServer:
             rewind_message_id = str(body.get("rewind_message_id") or body.get("rewindMessageId") or "").strip()
             rewind_result = None
             regenerate_plan = {}
+            regenerate_requires_image = False
+            if regenerate_message_id or rewind_message_id:
+                rewind_snapshot = self.group_chat_store.list_messages(room_id)
             if regenerate_message_id:
                 try:
                     regenerate_plan = self._group_chat_regenerate_plan(room_id, regenerate_message_id)
@@ -7042,6 +8505,7 @@ class GalleryServer:
                 force_image_request = regenerate_plan.get("force_image_request")
                 if isinstance(force_image_request, dict) and force_image_request:
                     body["_force_image_request"] = force_image_request
+                    regenerate_requires_image = True
                     body["_regenerate_hint"] = (
                         "这是回溯重发：请重新生成被点击的这条消息本身。"
                         "原消息包含图片，本次必须重新写一条聊天文字，并提供 image_request 对象重新生成图片。"
@@ -7066,12 +8530,15 @@ class GalleryServer:
             if not targets:
                 response = {"error": "no_reply_participants"}
                 if rewind_message_id:
+                    restore_rewind_snapshot()
+                    room = self.group_chat_store.get_room(room_id) or room
                     payload = self.group_chat_store.room_payload(room_id, message_limit=50)
                     response.update({
                         "messages": [],
                         "rewind": {
                             "message_id": rewind_message_id,
                             "removed_count": (rewind_result or {}).get("removed_count", 0),
+                            "restored": True,
                         },
                         "room": self._public_group_room_payload((payload or {}).get("room") or room, message_limit=50) if payload else None,
                         "room_payload": payload,
@@ -7095,14 +8562,21 @@ class GalleryServer:
                 character_id = str(character.get("id") or "").strip()
                 character_name = str(character.get("name") or character_id or "角色").strip()
                 preferred_model = str(character.get("llm_model") or "").strip()
-                prompt = self._group_chat_reply_prompt(
-                    room,
-                    character,
-                    participants,
-                    messages + generated,
-                    regenerate_hint=str(body.get("_regenerate_hint") or ""),
+                progress_token = self._set_group_chat_reply_progress(
+                    room_id,
+                    "typing",
+                    character_id,
+                    character_name,
                 )
+                image_task = None
                 try:
+                    prompt = self._group_chat_reply_prompt(
+                        room,
+                        character,
+                        participants,
+                        messages + generated,
+                        regenerate_hint=str(body.get("_regenerate_hint") or ""),
+                    )
                     raw_content, used_model = await self._call_group_chat_llm(
                         prompt,
                         preferred_model=preferred_model,
@@ -7150,11 +8624,21 @@ class GalleryServer:
                         parent_message_id = str(message.get("id") or "")
                         public_message = self._public_group_message(message)
                         generated.append(public_message)
+                        if rewind_snapshot and parent_message_id:
+                            rewind_generated_ids.add(parent_message_id)
                         messages.append(message)
 
                     if image_request:
                         try:
-                            public_image, image_message = await self._generate_group_chat_image_message(
+                            self._set_group_chat_reply_progress(
+                                room_id,
+                                "image",
+                                character_id,
+                                character_name,
+                                token=progress_token,
+                            )
+                            image_task = self._start_group_chat_image_task(
+                                progress_token,
                                 room_id,
                                 room,
                                 character,
@@ -7167,15 +8651,13 @@ class GalleryServer:
                                 rewind_message_id,
                                 parent_message_id,
                             )
+                            public_image, image_message = await asyncio.shield(image_task)
                             generated.append(public_image)
+                            image_message_id = str(image_message.get("id") or "")
+                            if rewind_snapshot and image_message_id:
+                                rewind_generated_ids.add(image_message_id)
                             messages.append(image_message)
                         except Exception as image_error:
-                            logger.warning(
-                                "Group chat image tool call failed: room=%s character=%s err=%s",
-                                room_id,
-                                character_id,
-                                image_error,
-                            )
                             failures.append({
                                 "character_id": character_id,
                                 "character_name": character_name,
@@ -7194,12 +8676,29 @@ class GalleryServer:
                         "character_name": character_name,
                         "error": str(e),
                     })
+                finally:
+                    if image_task is None:
+                        self._clear_group_chat_reply_progress(room_id, progress_token)
+
+            generated_image = any(
+                str(item.get("type") or item.get("message_type") or "").strip().lower() == "image"
+                for item in generated
+                if isinstance(item, dict)
+            )
+            rollback_required = not generated or (regenerate_requires_image and not generated_image)
+            if rollback_required and rewind_message_id:
+                restore_rewind_snapshot()
 
             payload = self.group_chat_store.room_payload(room_id, message_limit=50)
             public_room = self._public_group_room_payload((payload or {}).get("room") or room, message_limit=50) if payload else None
-            if not generated:
+            if rollback_required:
                 response = {
                     "error": "reply_generation_failed",
+                    "message": (
+                        "图片重新生成失败，已保留原图和原聊天记录。"
+                        if regenerate_requires_image
+                        else "回溯重发失败，已保留原聊天记录。"
+                    ),
                     "failures": failures,
                 }
                 if rewind_message_id:
@@ -7208,6 +8707,7 @@ class GalleryServer:
                         "rewind": {
                             "message_id": rewind_message_id,
                             "removed_count": (rewind_result or {}).get("removed_count", 0),
+                            "restored": rewind_restored,
                         },
                         "room": public_room,
                         "room_payload": payload,
@@ -7224,6 +8724,14 @@ class GalleryServer:
                 "room_payload": payload,
             })
         except Exception as e:
+            try:
+                restore_rewind_snapshot()
+            except Exception as restore_error:
+                logger.error(
+                    "Group chat rewind restore failed: room=%s err=%s",
+                    room_id,
+                    restore_error,
+                )
             logger.error("Group chat reply API error: %s", e)
             return web.json_response({"error": str(e)}, status=500)
 
@@ -7483,7 +8991,7 @@ class GalleryServer:
         return activity, prompt, outfit
 
     def _today_schedule_entry(self, today_str: str = "") -> dict:
-        today_str = today_str or date.today().isoformat()
+        today_str = today_str or self._today().isoformat()
         try:
             all_data = ScheduleStore(self.data_dir).load()
         except Exception as e:
@@ -7917,7 +9425,7 @@ JSON 格式：
             except Exception:
                 extra_hint = ""
 
-            now = datetime.now()
+            now = self._now()
             now_str = now.strftime("%H:%M")
             today_str = now.strftime("%Y-%m-%d")
             logger.info("Generate now: time=%s, extra_hint=%r, using today's schedule chain", now_str, extra_hint)
@@ -7926,10 +9434,21 @@ JSON 格式：
             daily = self._today_schedule_entry(today_str)
             schedule_text = daily.get("schedule", "") if daily else ""
             if not schedule_text:
-                return web.json_response({
-                    "error": "schedule_missing",
-                    "message": "请先刷新今日日程，再使用“现在在干嘛”。",
-                }, status=400)
+                logger.warning("Generate now found no schedule; refreshing today's schedule first")
+                try:
+                    refreshed = await self._refresh_schedule_singleflight()
+                except Exception as e:
+                    logger.error("Generate now schedule refresh failed: %s", e)
+                    refreshed = None
+                daily = self._today_schedule_entry(today_str)
+                if not daily and refreshed is not None:
+                    daily = refreshed.to_dict() if hasattr(refreshed, "to_dict") else dict(refreshed or {})
+                schedule_text = daily.get("schedule", "") if daily else ""
+                if not schedule_text:
+                    return web.json_response({
+                        "error": "schedule_missing",
+                        "message": "今日日程补生成失败，请稍后重试。",
+                    }, status=503)
             if not self._schedule_items_for_inference(schedule_text):
                 return web.json_response({
                     "error": "schedule_time_not_found",
@@ -7975,29 +9494,28 @@ JSON 格式：
 
             keys_config = self._load_api_keys_config()
             plugin_config = self._load_plugin_config()
-            gpt_key = keys_config.get("gpt_key", "") or os.environ.get("GPT_IMAGE_API_KEY", "")
-            raw_configured_gpt_base_url = str(self.config.get("image_gen", {}).get("gpt_base_url", "") or "").strip()
-            configured_gpt_base_url = self._configured_image_base_url(
-                raw_configured_gpt_base_url
+            gpt_key = (
+                keys_config.get("gpt_key", "")
+                or os.environ.get("GPT_IMAGE_API_KEY", "")
+                or keys_config.get("cpa_key", "")
+                or os.environ.get("CPA_API_KEY", "")
             )
-            local_gpt_base_url = str(keys_config.get("gpt_base_url", "") or "").strip()
-            if (
-                local_gpt_base_url == raw_configured_gpt_base_url
-                or self._gpt_image_endpoint_identity(local_gpt_base_url) == self._gpt_image_endpoint_identity(configured_gpt_base_url)
-            ):
-                local_gpt_base_url = ""
-            gpt_base_url = (
-                local_gpt_base_url
-                or os.environ.get("GPT_IMAGE_BASE_URL", "")
-                or configured_gpt_base_url
-            )
-            gitee_keys = plugin_config.get("gitee_config", {}).get("api_keys", [])
-            gitee_key = gitee_keys[0] if gitee_keys else ""
-            gpt_available = bool(str(gpt_base_url or "").strip() or str(gpt_key or "").strip())
-            if not gpt_available and not gitee_key:
+            gpt_base_url = self._effective_gpt_image_base_url(keys_config)
+            gpt_image_endpoints = keys_config.get("gpt_image_endpoints") or []
+            complete_gpt_endpoints = [
+                item for item in gpt_image_endpoints
+                if isinstance(item, dict)
+                and str(item.get("base_url", "") or "").strip()
+                and str(item.get("api_key", "") or "").strip()
+            ]
+            gitee_key = self._effective_gitee_api_key(plugin_config)
+            gitee_url = self._effective_gitee_image_url(keys_config)
+            gpt_available = bool(complete_gpt_endpoints or (gpt_base_url and gpt_key))
+            gitee_available = bool(gitee_url and gitee_key)
+            if not gpt_available and not gitee_available:
                 return web.json_response({
-                    "error": "missing_image_key",
-                    "message": "请先在设置里配置 GPT Image Base URL 或 Gitee Key，再使用“现在在干嘛”。",
+                    "error": "missing_image_config",
+                    "message": "请先完整配置 GPT Image Base URL + Key，或 Gitee API URL + Key，再使用“现在在干嘛”。",
                 }, status=400)
 
             # 2) 调用统一日程生图链路。generate.py 会根据 schedule_time 读取
@@ -8006,7 +9524,10 @@ JSON 格式：
             cpa_base_url = request_config["base_url"]
             cpa_key = request_config["api_key"]
             generate_script = self._generate_script()
-            engine = self.config.get("image_gen", {}).get("default_engine", "gptimage") if gpt_available else "gitee"
+            preferred_engine = self.config.get("image_gen", {}).get("default_engine", "gptimage")
+            engine = "gitee" if preferred_engine == "gitee" and gitee_available else "gptimage"
+            if engine == "gptimage" and not gpt_available:
+                engine = "gitee"
             child_env_extra = {}
             if gpt_base_url:
                 child_env_extra["GPT_IMAGE_BASE_URL"] = gpt_base_url
@@ -8014,9 +9535,12 @@ JSON 格式：
                 child_env_extra["CPA_API_KEY"] = cpa_key
             if gpt_key or cpa_key:
                 child_env_extra["GPT_IMAGE_API_KEY"] = gpt_key or cpa_key
-            gpt_image_endpoints = keys_config.get("gpt_image_endpoints") or []
-            if isinstance(gpt_image_endpoints, list) and gpt_image_endpoints:
-                child_env_extra["GPT_IMAGE_ENDPOINTS"] = json.dumps(gpt_image_endpoints, ensure_ascii=False)
+            if complete_gpt_endpoints:
+                child_env_extra["GPT_IMAGE_ENDPOINTS"] = json.dumps(complete_gpt_endpoints, ensure_ascii=False)
+            if gitee_url:
+                child_env_extra["GITEE_API_URL"] = gitee_url
+            if gitee_key:
+                child_env_extra["GITEE_API_KEY"] = gitee_key
             if cpa_base_url:
                 child_env_extra["CPA_BASE_URL"] = cpa_base_url
             child_env = self._child_env(child_env_extra)
@@ -8054,6 +9578,7 @@ JSON 格式：
                 "--caption",
                 "--source", "web",
                 "--engine", engine,
+                "--size", schedule_image_size(self.config),
                 "--schedule-time", schedule_time,
             ]
             if selected_reference.get("path") and engine == "gptimage":
@@ -8080,8 +9605,8 @@ JSON 格式：
                 detail = stderr.decode(errors='replace')[-500:]
                 if "GPT_IMAGE_API_KEY or gpt_key is required" in detail:
                     return web.json_response({
-                        "error": "missing_image_key",
-                        "message": "请先在设置里配置 GPT Image Base URL 或 Gitee Key，再使用“现在在干嘛”。",
+                        "error": "missing_image_config",
+                        "message": "请先完整配置 GPT Image Base URL + Key，或 Gitee API URL + Key，再使用“现在在干嘛”。",
                     }, status=400)
                 return web.json_response({
                     "error": "generate_failed",
@@ -8177,6 +9702,19 @@ JSON 格式：
             ref_image = self._resolve_reference_image(raw_ref_image, allow_any_path=True)
             if raw_ref_image and not ref_image:
                 return web.json_response({"error": "invalid_ref_image"}, status=400)
+            selected_reference = {}
+            if ref_image:
+                selected_reference = (
+                    self._reference_profile_for_value(raw_ref_image)
+                    or self._reference_profile_for_value(ref_image)
+                    or self._wardrobe_reference_for_value(raw_ref_image)
+                    or self._wardrobe_reference_for_value(ref_image)
+                )
+                if selected_reference and not selected_reference.get("path"):
+                    selected_reference["path"] = ref_image
+            elif not pure:
+                selected_reference = self._select_default_custom_reference_sync()
+                ref_image = str(selected_reference.get("path") or "").strip()
             api_source = self._normalize_api_source(
                 body.get("api_source"),
                 body.get("source"),
@@ -8208,7 +9746,18 @@ JSON 格式：
             raw_image_model = str(body.get("model") or body.get("image_model") or body.get("gpt_model") or "").strip()
             if raw_image_model and not image_model and raw_image_model.lower() not in {"default", "auto", "current"}:
                 return web.json_response({"error": "invalid_image_model"}, status=400)
-            entry = await self.on_generate_custom(user_prompt, size, ref_image, shot_type, pure, api_source, api_caption, image_model, api_description)
+            entry = await self.on_generate_custom(
+                user_prompt,
+                size,
+                ref_image,
+                shot_type,
+                pure,
+                api_source,
+                api_caption,
+                image_model,
+                api_description,
+                selected_reference,
+            )
             if entry and entry.status == "ok":
                 payload = entry.to_dict()
                 try:
@@ -8266,14 +9815,12 @@ JSON 格式：
 
                 store.update(_remove_deleted_entries)
 
-                metadata = self._load_image_metadata()
-                changed = False
-                for filename in deleted_set:
-                    if filename in metadata:
-                        del metadata[filename]
-                        changed = True
-                if changed:
-                    self._save_image_metadata(metadata)
+                def _remove_deleted_metadata(metadata):
+                    for filename in deleted_set:
+                        metadata.pop(filename, None)
+                    return metadata
+
+                ImageMetadataStore(self.data_dir).update(_remove_deleted_metadata)
 
             return web.json_response({
                 "success": True,
@@ -8292,36 +9839,11 @@ JSON 格式：
     async def handle_delete_image(self, request: web.Request):
         """删除图片和条目"""
         img_id = request.match_info.get("img_id")
-        # Path traversal validation: only allow safe characters
-        if not img_id or not re.match(r'^[a-zA-Z0-9_.-]+$', img_id) or '..' in img_id:
-            return web.json_response({"error": "invalid_filename"}, status=400)
         try:
-            # 1. Delete image file
-            self._delete_image_files(img_id)
-
-            # 2. Remove from schedule_data.json
-            store = ScheduleStore(self.data_dir)
-            def _delete_entry(all_data):
-                removed = False
-                # Try direct key match (filename as key)
-                if img_id in all_data:
-                    del all_data[img_id]
-                    removed = True
-                else:
-                    # Try matching by image_filename field
-                    for key, entry in list(all_data.items()):
-                        if entry.get("image_filename") == img_id:
-                            del all_data[key]
-                            removed = True
-                return all_data
-            store.update(_delete_entry)
-
-            metadata = self._load_image_metadata()
-            if img_id in metadata:
-                del metadata[img_id]
-                self._save_image_metadata(metadata)
-
-            return web.json_response({"success": True})
+            result = self._delete_gallery_image(img_id)
+            return web.json_response({"success": True, **result})
+        except ValueError as e:
+            return web.json_response({"error": str(e) or "invalid_filename"}, status=400)
         except Exception as e:
             logger.error(f"Delete image error: {e}")
             return web.json_response({"error": str(e)}, status=500)
@@ -8346,6 +9868,91 @@ JSON 格式：
         except Exception as e:
             logger.error(f"Reroll image error: {e}")
             return web.json_response({"error": str(e)}, status=500)
+
+    async def handle_edit_image(self, request: web.Request):
+        """Precision-edit a gallery image and replace its current card."""
+        img_id = request.match_info.get("img_id")
+        try:
+            img_id = self._normalize_gallery_image_filename(img_id)
+        except ValueError:
+            return web.json_response({"error": "invalid_filename", "message": "图片标识无效"}, status=400)
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid_json", "message": "编辑参数格式无效"}, status=400)
+        if not isinstance(body, dict):
+            return web.json_response({"error": "invalid_json", "message": "编辑参数格式无效"}, status=400)
+
+        target = normalize_image_edit_target(body.get("target"))
+        raw_instruction = str(body.get("instruction") or "")
+        instruction = normalize_image_edit_instruction(raw_instruction)
+        if not target:
+            return web.json_response({"error": "invalid_edit_target", "message": "请选择有效的编辑范围"}, status=400)
+        if len(raw_instruction.strip()) > MAX_IMAGE_EDIT_INSTRUCTION_LENGTH:
+            return web.json_response({"error": "edit_instruction_too_long", "message": "编辑内容不能超过 800 字"}, status=400)
+        schedule_description = None
+        if "schedule_description" in body:
+            raw_schedule_description = str(body.get("schedule_description") or "").strip()
+            if len(raw_schedule_description) > MAX_IMAGE_EDIT_SCHEDULE_DESCRIPTION_LENGTH:
+                return web.json_response(
+                    {"error": "schedule_description_too_long", "message": "日程说明不能超过 160 字"},
+                    status=400,
+                )
+            schedule_description = normalize_image_edit_schedule_description(raw_schedule_description)
+            if not schedule_description:
+                return web.json_response(
+                    {"error": "schedule_description_required", "message": "日程说明不能为空"},
+                    status=400,
+                )
+        if not instruction and schedule_description is None:
+            return web.json_response(
+                {"error": "edit_instruction_required", "message": "请输入修改内容或调整日程说明"},
+                status=400,
+            )
+        if not self.on_edit_image:
+            return web.json_response({"error": "image_edit_unavailable", "message": "图片编辑功能暂不可用"}, status=503)
+
+        try:
+            entry = await self.on_edit_image(
+                img_id,
+                target,
+                instruction,
+                schedule_description,
+            )
+            if not entry or entry.get("status") != "ok":
+                error = (entry or {}).get("error") or "edit_generate_failed"
+                if error in {"not_found", "image_file_missing"}:
+                    status = 404
+                elif error == "edit_source_changed":
+                    status = 409
+                elif error in {
+                    "invalid_edit_target",
+                    "edit_instruction_required",
+                    "schedule_description_required",
+                    "schedule_description_too_long",
+                }:
+                    status = 400
+                else:
+                    status = 500
+                messages = {
+                    "not_found": "图片记录不存在",
+                    "image_file_missing": "原图片文件不存在",
+                    "edit_reference_lost": "编辑结果未保留原图，已拒绝该结果",
+                    "edit_generate_failed": "GPT Image 未能完成本次精准编辑",
+                    "edit_source_changed": "原图片在编辑期间已被删除或替换，本次结果未保存",
+                    "edit_instruction_required": "请输入修改内容或调整日程说明",
+                    "schedule_description_required": "日程说明不能为空",
+                    "schedule_description_too_long": "日程说明不能超过 160 字",
+                }
+                return web.json_response(
+                    {"error": error, "message": messages.get(error, "图片编辑失败")},
+                    status=status,
+                )
+            metadata = self._load_image_metadata()
+            return web.json_response(self._enrich_photo_schedule_time(entry, metadata))
+        except Exception as e:
+            logger.error("Image edit error: %s", e, exc_info=True)
+            return web.json_response({"error": "image_edit_failed", "message": str(e)}, status=500)
 
     @staticmethod
     def _coerce_bool(value, default: bool) -> bool:
@@ -8665,7 +10272,11 @@ JSON 格式：
             return {"error": f"检查更新失败: {e}"}, 500
 
     def _safe_update_plan(self, project_root: Path, remote_ref: str, env: dict[str, str]) -> dict:
-        all_changed = self._git_run(["diff", "--name-status", "HEAD.." + remote_ref, "--"], project_root, env)
+        all_changed = self._git_run(
+            ["diff", "--no-renames", "--name-status", "HEAD.." + remote_ref, "--"],
+            project_root,
+            env,
+        )
         if all_changed.returncode != 0:
             raise RuntimeError(all_changed.stderr.strip() or all_changed.stdout.strip() or "无法读取远端改动列表")
         all_files = []
@@ -8719,8 +10330,49 @@ JSON 格式：
         if fetch.returncode != 0:
             return {"error": f"git fetch 失败: {fetch.stderr.strip() or fetch.stdout.strip()}"}, 500
 
+        fast_forward = self._git_run(
+            ["merge-base", "--is-ancestor", "HEAD", remote_ref],
+            project_root,
+            env,
+        )
+        if fast_forward.returncode != 0:
+            if fast_forward.returncode != 1 or fast_forward.stderr.strip():
+                detail = fast_forward.stderr.strip() or fast_forward.stdout.strip()
+                return {
+                    "error": "update_git_check_failed",
+                    "message": f"无法验证远端更新关系: {detail or 'git merge-base failed'}",
+                    "safe_update": False,
+                }, 500
+            return {
+                "status": "conflict",
+                "error": "update_not_fast_forward",
+                "message": "远端更新不是当前版本的快进提交，已停止自动升级。",
+                "safe_update": False,
+            }, 409
+        current_head = self._git_run(["rev-parse", "HEAD"], project_root, env)
+        if current_head.returncode != 0 or not current_head.stdout.strip():
+            return {"error": "无法读取当前 Git 提交"}, 500
+        current_head_ref = current_head.stdout.strip()
+
         plan = self._safe_update_plan(project_root, remote_ref, env)
         changed_files = plan["updated_files"]
+        local_changed_files = self._local_update_changed_files(project_root, env)
+        conflicting_files = sorted(set(changed_files).intersection(local_changed_files))
+        plan["local_changed_files"] = local_changed_files
+        plan["conflicting_files"] = conflicting_files
+        if conflicting_files:
+            return {
+                **plan,
+                "status": "conflict",
+                "error": "local_changes_conflict",
+                "message": "本地未提交修改与远端更新冲突，已停止升级，未覆盖任何文件。",
+                "remote": remote,
+                "branch": branch,
+                "remote_ref": remote_ref,
+                "dry_run": bool(dry_run),
+                "will_restart": False,
+                "safe_update": False,
+            }, 409
         response = {
             **plan,
             "status": "ok",
@@ -8738,12 +10390,25 @@ JSON 格式：
             )
             return response, 200
 
-        if not changed_files:
+        if not plan.get("all_changed_files"):
             response["message"] = "没有可更新的代码文件；本地数据与配置已保持不变"
             return response, 200
 
         checkout_files = plan.get("checkout_files") or []
         deleted_files = plan.get("deleted_files") or []
+        latest_local_changes = self._local_update_changed_files(project_root, env)
+        latest_conflicts = sorted(set(changed_files).intersection(latest_local_changes))
+        if latest_conflicts:
+            return {
+                **response,
+                "status": "conflict",
+                "error": "local_changes_conflict",
+                "message": "升级前检测到新的本地修改，已停止升级，未覆盖任何文件。",
+                "local_changed_files": latest_local_changes,
+                "conflicting_files": latest_conflicts,
+                "will_restart": False,
+                "safe_update": False,
+            }, 409
         if checkout_files:
             result = self._git_run(["checkout", remote_ref, "--", *checkout_files], project_root, env, timeout=90)
             if result.returncode != 0:
@@ -8752,6 +10417,25 @@ JSON 格式：
             result = self._git_run(["rm", "-r", "--ignore-unmatch", "--", *deleted_files], project_root, env, timeout=90)
             if result.returncode != 0:
                 return {"error": f"安全更新删除旧文件失败: {result.stderr.strip() or result.stdout.strip()}"}, 500
+
+        move_head = self._git_run(
+            ["update-ref", "HEAD", remote_ref, current_head_ref],
+            project_root,
+            env,
+        )
+        if move_head.returncode != 0:
+            return {"error": f"更新 Git 基线失败: {move_head.stderr.strip() or move_head.stdout.strip()}"}, 500
+        reset_paths = sorted(set(plan.get("all_changed_files") or []))
+        if reset_paths:
+            reset_index = self._git_run(
+                ["reset", "HEAD", "--", *reset_paths],
+                project_root,
+                env,
+            )
+            if reset_index.returncode != 0:
+                return {
+                    "error": f"刷新 Git 索引失败: {reset_index.stderr.strip() or reset_index.stdout.strip()}"
+                }, 500
 
         response["message"] = "更新成功，服务即将重启；本地 API Key、Base URL、appearance、图片和参考图已保留"
         if restart:

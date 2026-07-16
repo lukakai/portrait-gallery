@@ -4,14 +4,18 @@ from __future__ import annotations
 import json
 import os
 import re
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
+from zoneinfo import ZoneInfo
 
 import yaml
 
 APP_DIR = Path(__file__).resolve().parent
 DEFAULT_PROJECT_ROOT = APP_DIR.parent
+
+DEFAULT_GITEE_IMAGE_URL = "https://ai.gitee.com/v1/images/generations"
 
 DEFAULT_OUTFIT_STYLES = [
     "冷御风", "甜美风", "元气风", "温柔风", "优雅风",
@@ -54,6 +58,47 @@ DEFAULT_STYLE_REFERENCE_PROMPTS = {
     ),
 }
 
+RUNTIME_CONFIG_MUTABLE_FIELDS = {
+    "llm": {"model", "models", "fallback_model"},
+    "integrations": {"hermes_cli", "openclaw_cli"},
+}
+
+
+def configured_timezone(config: dict | None = None) -> ZoneInfo:
+    timezone_name = str(get_nested(config or {}, "config.timezone", "") or "").strip()
+    timezone_name = timezone_name or os.getenv("TZ", "") or "Asia/Shanghai"
+    try:
+        return ZoneInfo(timezone_name)
+    except Exception:
+        return ZoneInfo("Asia/Shanghai")
+
+
+def service_now(config: dict | None = None) -> datetime:
+    return datetime.now(configured_timezone(config))
+
+
+def service_today(config: dict | None = None) -> date:
+    return service_now(config).date()
+
+
+def normalize_runtime_config(value: Any) -> dict:
+    """Keep Web-mutated overrides inside the intentionally writable surface."""
+    if not isinstance(value, dict):
+        return {}
+    result = {}
+    for section, allowed_fields in RUNTIME_CONFIG_MUTABLE_FIELDS.items():
+        section_value = value.get(section)
+        if not isinstance(section_value, dict):
+            continue
+        cleaned = {
+            key: field_value
+            for key, field_value in section_value.items()
+            if key in allowed_fields
+        }
+        if cleaned:
+            result[section] = cleaned
+    return result
+
 DEFAULT_BASE_STYLE_LABELS = {
     "cool": "冷御风",
     "girly": "少女风",
@@ -87,7 +132,39 @@ DEFAULT_THEME_STYLE_MAP = {
 DEFAULT_CUSTOM_IMAGE_ASPECT = "1:1"
 DEFAULT_CUSTOM_IMAGE_RESOLUTION = "1k"
 DEFAULT_CUSTOM_IMAGE_SIZE = "1024x1024"
+DEFAULT_SCHEDULE_IMAGE_SIZE = "1536x2048"
 DEFAULT_CUSTOM_SHOT_TYPE = "selfie"
+
+LEGACY_SCHEDULE_IMAGE_FRAMING_RULE = (
+    "Mandatory 3:4 full-body environmental framing: pull the camera back and show the entire person "
+    "from the complete top of the hair to both shoes, adapted naturally to the scheduled action. "
+    "Keep clear breathing room above the hair and below the feet, with the head safely inside the upper "
+    "80 percent of the canvas and all limbs, hands, footwear, and important props inside the frame. "
+    "For seated or leaning actions, show the complete head, full seated posture, legs, feet, and surrounding "
+    "activity area. Use an eye-level camera at a comfortable distance; no close-up, medium crop, high-angle "
+    "crop, oversized person, cut-off forehead, missing hair, cropped knees, or cropped shoes. "
+    "Fill the entire 3:4 canvas edge to edge with the photographed scene; no black bars, blurred side panels, "
+    "letterboxing, pillarboxing, frames, borders, or blank margins. "
+    "This complete-subject framing rule overrides any casual or slightly imperfect framing instruction."
+)
+
+SCHEDULE_IMAGE_FRAMING_RULE = (
+    "Professional 3:4 lifestyle photography composition: act as an experienced portrait and documentary "
+    "photographer and choose the most compelling camera distance, angle, and crop for this exact action, prop, "
+    "outfit, and setting. For ordinary daily photos, default to a medium or three-quarter portrait, never a "
+    "head-to-toe view, so the face, hands, important props, and action remain visually clear. Use full-body framing "
+    "only when the scheduled Activity or Action explicitly asks for an OOTD, outfit check, mirror outfit, or clothing "
+    "showcase. Use a wider environmental composition only when the scheduled Activity or Action explicitly centers "
+    "on sharing scenery, a landscape, architecture, or the sense of place. A detailed outfit description, standing, "
+    "walking, visible shoes, or a reference image's crop never counts as an OOTD request and must not trigger a "
+    "full-body frame. Do not copy the reference image's camera distance or crop. Compose "
+    "with natural perspective, visual balance, useful foreground and background layers, and intentional negative "
+    "space. Avoid a stiff centered catalog pose, a tiny subject surrounded by empty floor or ceiling, forced "
+    "head-to-toe framing, arbitrary high angles, and crops through the face, hands, or important props. Fill the "
+    "entire 3:4 canvas edge to edge with the photographed scene; no black bars, blurred side panels, letterboxing, "
+    "pillarboxing, frames, borders, or blank margins. This photographic composition rule overrides any generic "
+    "full-body or slightly imperfect framing instruction."
+)
 
 CUSTOM_IMAGE_FRAMING_RULE = (
     "strict framing rule: preserve the requested camera view and shot type, "
@@ -173,6 +250,8 @@ CUSTOM_IMAGE_ALLOWED_SIZES = {
     for size in by_resolution.values()
 }
 
+SCHEDULE_IMAGE_ALLOWED_SIZES = set(CUSTOM_IMAGE_SIZE_MAP["3:4"].values())
+
 DEFAULT_PERSONA_SOURCE = "custom"
 PERSONA_SOURCE_ALIASES = {
     "custom": "custom",
@@ -256,6 +335,26 @@ def normalize_custom_image_size(size: Any = "", aspect: Any = "", resolution: An
     safe_aspect = normalize_custom_image_aspect(aspect)
     safe_resolution = normalize_custom_image_resolution(resolution)
     return CUSTOM_IMAGE_SIZE_MAP.get(safe_aspect, {}).get(safe_resolution, DEFAULT_CUSTOM_IMAGE_SIZE)
+
+
+def schedule_image_size(config: Any) -> str:
+    """Return the stable 3:4 output size used by gallery schedule photos."""
+    image_config = config.get("image_gen", {}) if isinstance(config, dict) else {}
+    if not isinstance(image_config, dict):
+        image_config = {}
+    configured = image_config.get("schedule_size") or image_config.get("metadata_size")
+    size_text = _non_empty(configured).lower()
+    return size_text if size_text in SCHEDULE_IMAGE_ALLOWED_SIZES else DEFAULT_SCHEDULE_IMAGE_SIZE
+
+
+def apply_schedule_image_framing(prompt: Any) -> str:
+    raw_text = _non_empty(prompt)
+    if not raw_text:
+        return raw_text
+    if "Professional 3:4 lifestyle photography composition:" in raw_text:
+        return raw_text
+    text = raw_text.replace(LEGACY_SCHEDULE_IMAGE_FRAMING_RULE, "").rstrip(" .")
+    return f"{text}. {SCHEDULE_IMAGE_FRAMING_RULE}"
 
 
 def normalize_custom_shot_type(value: Any) -> str:
@@ -804,6 +903,13 @@ def load_config(config_path: str = "") -> dict:
             local_config = yaml.safe_load(f) or {}
         if isinstance(local_config, dict):
             config = deep_merge(config, local_config)
+
+    # Mutable Web settings live with deployment data so the base config can
+    # remain read-only in Docker images.
+    data_dir = resolve_data_dir(config, path)
+    runtime_config = normalize_runtime_config(load_json_file(runtime_config_path(data_dir)))
+    if runtime_config:
+        config = deep_merge(config, runtime_config)
     return config
 
 
@@ -1188,6 +1294,10 @@ def api_keys_path(data_dir: str) -> str:
 
 def plugin_config_path(data_dir: str) -> str:
     return os.path.join(data_dir, "plugin_config.json")
+
+
+def runtime_config_path(data_dir: str) -> str:
+    return os.path.join(data_dir, "runtime_config.json")
 
 
 def normalize_chat_url(base_url: str) -> str:

@@ -6,7 +6,6 @@ import os
 import random
 import re
 import sys
-from datetime import date
 from typing import Optional
 
 import requests
@@ -25,12 +24,14 @@ from core import (
     get_llm_models,
     get_reference_path,
     send_photo,
+    update_metadata_caption,
 )
 from generate_gitee import MODEL_NAME as GITEE_MODEL_NAME
 from generate_gitee import generate as generate_with_gitee
 from generate_gptimage import GPTIMAGE_DIRECT_MODEL
 from generate_gptimage import generate as generate_with_gptimage
 from settings import (
+    apply_schedule_image_framing,
     llm_choice_text,
     llm_temperature_param_error,
     load_schedule_forbidden_keywords,
@@ -38,6 +39,8 @@ from settings import (
     sanitize_schedule_forbidden_detail,
     sanitize_schedule_forbidden_text,
     schedule_forbidden_negative_clause,
+    service_now,
+    service_today,
     style_reference_filename,
 )
 
@@ -73,7 +76,7 @@ def _extract_outfit_style_name(outfit_info: str) -> str:
 
 
 def _get_today_outfit_style_name() -> str:
-    today_str = date.today().isoformat()
+    today_str = service_today(_GALLERY_CONFIG).isoformat()
     if not os.path.exists(_SCHEDULE_PATH):
         return ""
     try:
@@ -271,13 +274,20 @@ def resolve_prompt(
     return build_prompt(theme, prompt_override)
 
 
-def _generate_with_gemini_cpa(theme: str, prompt: str):
+def _generate_with_gemini_cpa(theme: str, prompt: str, schedule_time: str = ""):
     """Call CPA gemini-3.1-flash-image model, return image path or None."""
     import base64
     import re
     import time
     import requests
-    from core import get_cpa_chat_url, get_cpa_key, save_image, update_metadata, sync_to_gallery
+    from core import (
+        get_cpa_chat_url,
+        get_cpa_key,
+        save_image,
+        schedule_filename_theme,
+        sync_to_gallery,
+        update_metadata,
+    )
 
     api_key = get_cpa_key()
     headers = {"Content-Type": "application/json"}
@@ -323,7 +333,13 @@ def _generate_with_gemini_cpa(theme: str, prompt: str):
             return None
 
         elapsed = round(time.time() - start, 2)
-        path, filename, ts = save_image(img_data, theme, _GEMINI_CPA_MODEL)
+        filename_theme = schedule_filename_theme(theme, schedule_time)
+        path, filename, ts = save_image(
+            img_data,
+            theme,
+            _GEMINI_CPA_MODEL,
+            filename_theme=filename_theme,
+        )
         update_metadata(filename, theme, prompt, _GEMINI_CPA_MODEL, ts, elapsed)
         # sync_to_gallery 由 generate.py 统一处理，此处不重复
         return path
@@ -419,8 +435,7 @@ def _schedule_time_constraint(value: str) -> str:
     time_text = _normalize_schedule_detail_time(value)
     if not time_text:
         return ""
-    hour, minute = [int(part) for part in time_text.split(":")]
-    clock = f"{hour:02d}:{minute:02d}"
+    hour = int(time_text.split(":", 1)[0])
     if 5 <= hour < 8:
         label = "early morning"
         lighting = "soft early-morning natural daylight"
@@ -439,21 +454,48 @@ def _schedule_time_constraint(value: str) -> str:
         forbid = "night, evening, neon nightlife, or street-lamp-dominated lighting"
     elif 17 <= hour < 19:
         label = "early evening"
-        lighting = "early-evening dusk or golden-hour light only if it fits the exact clock time"
+        lighting = "plausible early-evening dusk or golden-hour light"
         forbid = "deep night or neon nightlife unless explicitly described"
     elif 19 <= hour < 22:
         label = "evening"
-        lighting = "realistic evening ambient light matching the exact clock time"
+        lighting = "realistic evening ambient light"
         forbid = "midday sunlight or unrelated time-of-day changes"
     else:
         label = "late night"
-        lighting = "realistic late-night low light matching the exact clock time"
+        lighting = "realistic late-night low light"
         forbid = "daylight or unrelated time-of-day changes"
     return (
-        f"The scheduled clock time is {clock}, {label}. "
+        f"This activity takes place in the {label}. "
         f"Use {lighting}. "
-        f"Forbidden time mismatch: {forbid}."
+        f"Forbidden time-of-day mismatch: {forbid}."
     )
+
+
+def _apply_schedule_clock_render_guard(prompt: str, schedule_time: str) -> str:
+    """Keep schedule clocks as metadata and prevent models from painting them into images."""
+    normalized_time = _normalize_schedule_detail_time(schedule_time)
+    if not normalized_time:
+        return str(prompt or "").strip()
+    hour_text, minute_text = normalized_time.split(":", 1)
+    clock_variants = {
+        normalized_time,
+        f"{int(hour_text)}:{minute_text}",
+    }
+    clock_choices = "|".join(
+        re.escape(value)
+        for value in sorted(clock_variants, key=len, reverse=True)
+    )
+    clock_pattern = re.compile(
+        rf"(?<!\d)(?:{clock_choices})(?!\d)"
+    )
+    cleaned = clock_pattern.sub("the appropriate time of day", str(prompt or ""))
+    guard = (
+        "The schedule clock is metadata only and must never appear visually. Do not render any "
+        "readable time digits, timestamp, caption, corner overlay, wall or digital clock reading, "
+        "phone or screen time, receipt time, price-label time, storefront sign time, or floating text. "
+        "Any naturally present clock or display must be unreadable and must not show the scheduled time."
+    )
+    return f"{cleaned.rstrip(' .')}. {guard}"
 
 
 def _detail_time_is_daylight(value: str) -> bool:
@@ -624,7 +666,7 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "", schedule
     """Read daily schedule and return context, display slot, outfit, scene, and hair details."""
     if theme not in _THEME_PERIODS or not _THEME_PERIODS[theme]:
         return "", "", "", "", ""
-    today_str = date.today().isoformat()
+    today_str = service_today(_GALLERY_CONFIG).isoformat()
     data = {}
     if os.path.exists(_SCHEDULE_PATH):
         try:
@@ -775,8 +817,7 @@ def _get_schedule_context(theme: str, schedule_time_override: str = "", schedule
     }
     hour_min, hour_max = _THEME_HOURS.get(theme, (0, 0))
     # bedtime 包含凌晨 0-5 点
-    from datetime import datetime
-    now = datetime.now()
+    now = service_now(_GALLERY_CONFIG)
     # 优先用 schedule_time_override 的精确时间
     if schedule_time_override:
         _tm = re.match(r'(\d{1,2}):(\d{2})', schedule_time_override.strip())
@@ -848,6 +889,7 @@ def generate(
     schedule_detail_json: str = "",
     prompt_final: bool = False,
     no_auto_style: bool = False,
+    precise_edit: bool = False,
 ):
     forbidden_keywords = (
         _generation_schedule_forbidden_keywords()
@@ -928,8 +970,19 @@ def generate(
         file=sys.stderr,
     )
 
+    if schedule_time_constraint:
+        resolved_prompt = _apply_schedule_clock_render_guard(resolved_prompt, schedule_time)
+        print("🕒 Applied invisible schedule-clock guard", file=sys.stderr)
+
+    if source in {"cron", "web"}:
+        resolved_prompt = apply_schedule_image_framing(resolved_prompt)
+        print("📐 Applied adaptive photographic 3:4 framing guard", file=sys.stderr)
+
     # Resolve style to ref_image path (only supported by gptimage engine)
     requested_ref_image = ref_image
+    if precise_edit and (engine != "gptimage" or not requested_ref_image):
+        print("ERROR: precision edit requires GPT Image with a source image", file=sys.stderr)
+        return None
     auto_style = None
     explicit_style = style  # remember if user explicitly set --style
     if style:
@@ -983,11 +1036,14 @@ def generate(
             source=source,
             sync_gallery=False,
             schedule_time=schedule_raw,
+            precise_edit=precise_edit,
         )
         if path:
             used_model = GPTIMAGE_DIRECT_MODEL
         if not path:
-            if _gitee_fallback_enabled():
+            if precise_edit:
+                print("Precision edit failed; refusing non-reference fallback", file=sys.stderr)
+            elif _gitee_fallback_enabled():
                 print("GPT Image failed, falling back to Gitee", file=sys.stderr)
                 path = generate_with_gitee(
                     theme,
@@ -1004,7 +1060,7 @@ def generate(
             else:
                 print("GPT Image failed; Gitee fallback is disabled", file=sys.stderr)
     elif engine == "gemini":
-        path = _generate_with_gemini_cpa(theme, resolved_prompt)
+        path = _generate_with_gemini_cpa(theme, resolved_prompt, schedule_time=schedule_raw)
         if path:
             used_model = _GEMINI_CPA_MODEL
         if not path:
@@ -1059,12 +1115,13 @@ def generate(
     if path and caption:
         caption_text = build_caption_for_image(theme, path, schedule_time=schedule_raw)
         if caption_text:
+            update_metadata_caption(os.path.basename(path), caption_text)
             if send:
                 send_photo(path, caption_text)
             print(f"CAPTION:{caption_text}")
 
-    # Sync to Docker portrait gallery
-    if path:
+    # Precision edits are merged by the app after reference-mode validation.
+    if path and not precise_edit:
         from core import sync_to_gallery
         sync_to_gallery(path, os.path.basename(path), theme, actual_style,
                         prompt=resolved_prompt if forbidden_keywords else (prompt_override or resolved_prompt),
@@ -1093,6 +1150,7 @@ if __name__ == "__main__":
     parser.add_argument("--schedule-detail-json", type=str, default="", help="当前日程推断明细 JSON，用于即时生图")
     parser.add_argument("--prompt-final", action="store_true", help="prompt 已是完整生图提示词，不再注入画质/人设/发型")
     parser.add_argument("--no-auto-style", action="store_true", help="不自动选择底模参考图，用于纯文/纯图生图")
+    parser.add_argument("--precise-edit", action="store_true", help="严格局部编辑，禁止丢失原图参考后降级")
     args = parser.parse_args()
 
     effective_theme = args.theme or ("custom" if args.prompt else "morning")
@@ -1112,6 +1170,7 @@ if __name__ == "__main__":
         schedule_detail_json=args.schedule_detail_json,
         prompt_final=args.prompt_final,
         no_auto_style=args.no_auto_style,
+        precise_edit=args.precise_edit,
     )
     if not path:
         print("ERROR: generation failed", file=sys.stderr)
