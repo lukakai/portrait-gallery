@@ -82,6 +82,65 @@ class PhotoDeliveryRetryTest(unittest.IsolatedAsyncioTestCase):
             entry = ScheduleStore(app.data_dir).load()[image_path.name]
             self.assertEqual("sent", entry.get("delivery_status"))
 
+    async def test_telegram_connect_error_uses_short_retry(self):
+        app = PortraitGalleryApp.__new__(PortraitGalleryApp)
+        app._hermes_send_cooldown_until = 0.0
+        app._last_delivery_error = ""
+        connect_error = subprocess.CompletedProcess(
+            [],
+            1,
+            stdout=(
+                '{"error":"No deliverable text or media remained after processing MEDIA tags",'
+                '"warnings":["Failed to send media: httpx.ConnectError"]}'
+            ),
+            stderr="",
+        )
+        success = subprocess.CompletedProcess([], 0, stdout='{"ok":true}', stderr="")
+
+        with patch.object(
+            main_module.subprocess,
+            "run",
+            side_effect=[connect_error, success],
+        ) as run, patch.object(
+            main_module.asyncio,
+            "sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            ok = await app._run_hermes_send(
+                "hermes",
+                "telegram",
+                "MEDIA:/tmp/example.png",
+                "TG图片",
+                channel="telegram",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(2, run.call_count)
+        sleep.assert_awaited_once_with(3.0)
+
+    async def test_wechat_does_not_retry_telegram_connect_error(self):
+        app = PortraitGalleryApp.__new__(PortraitGalleryApp)
+        app._hermes_send_cooldown_until = 0.0
+        app._last_delivery_error = ""
+        connect_error = subprocess.CompletedProcess(
+            [],
+            1,
+            stdout='{"warnings":["httpx.ConnectError"]}',
+            stderr="",
+        )
+
+        with patch.object(main_module.subprocess, "run", return_value=connect_error) as run:
+            ok = await app._run_hermes_send(
+                "hermes",
+                "weixin",
+                "MEDIA:/tmp/example.png",
+                "微信图片",
+                channel="wechat",
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(1, run.call_count)
+
     async def test_retry_detects_delivery_failure_before_already_done(self):
         with tempfile.TemporaryDirectory() as tmpdir:
             app = self._make_app(Path(tmpdir))

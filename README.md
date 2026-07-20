@@ -339,6 +339,7 @@ Hermes 调用 `/api/generate-custom`、`/api/hermes/text-to-image` 或 `/api/her
 ### 未发布
 
 - GPT Image 生图彻底禁用 Chat 兼容回退；Images API 失败时直接停止，不再请求 `/chat/completions`。
+- TG 图片发送遇到 Hermes `ConnectError` 时使用短退避自动重试；微信发送策略保持不变。
 
 ### v1.3.6
 

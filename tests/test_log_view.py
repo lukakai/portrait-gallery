@@ -6,7 +6,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
 
 APP_DIR = Path(__file__).resolve().parents[1] / "app"
@@ -290,6 +290,58 @@ class LogViewFormattingTest(unittest.TestCase):
 
 
 class ManualSendFailureHandlingTest(unittest.IsolatedAsyncioTestCase):
+    async def test_telegram_connect_error_uses_short_retry(self):
+        server = GalleryServer.__new__(GalleryServer)
+        server._manual_send_cooldown_until = 0.0
+        server._manual_send_last_error = ""
+        connect_error = SimpleNamespace(
+            returncode=1,
+            stdout='{"warnings":["Failed to send media: httpcore.ConnectError"]}',
+            stderr="",
+        )
+        success = SimpleNamespace(returncode=0, stdout='{"ok":true}', stderr="")
+
+        with patch(
+            "web_server.subprocess.run",
+            side_effect=[connect_error, success],
+        ) as run, patch(
+            "web_server.asyncio.sleep",
+            new=AsyncMock(),
+        ) as sleep:
+            ok = await server._run_manual_hermes_send(
+                "hermes",
+                "telegram",
+                "MEDIA:/tmp/example.png",
+                "TG图片",
+                channel="telegram",
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(2, run.call_count)
+        sleep.assert_awaited_once_with(3.0)
+
+    async def test_wechat_does_not_retry_telegram_connect_error(self):
+        server = GalleryServer.__new__(GalleryServer)
+        server._manual_send_cooldown_until = 0.0
+        server._manual_send_last_error = ""
+        connect_error = SimpleNamespace(
+            returncode=1,
+            stdout='{"warnings":["httpx.ConnectError"]}',
+            stderr="",
+        )
+
+        with patch("web_server.subprocess.run", return_value=connect_error) as run:
+            ok = await server._run_manual_hermes_send(
+                "hermes",
+                "weixin",
+                "MEDIA:/tmp/example.png",
+                "微信图片",
+                channel="wechat",
+            )
+
+        self.assertFalse(ok)
+        self.assertEqual(1, run.call_count)
+
     async def test_context_failure_stops_after_one_attempt(self):
         server = GalleryServer.__new__(GalleryServer)
         server._manual_send_cooldown_until = 0.0

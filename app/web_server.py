@@ -214,6 +214,7 @@ SEND_CAPTION_DELAY_SECONDS = 3
 SEND_WECHAT_CAPTION_DELAY_SECONDS = 45
 SEND_TIMEOUT_SECONDS = 90
 SEND_RETRY_DELAYS_SECONDS = (60, 180)
+SEND_TELEGRAM_CONNECT_RETRY_DELAYS_SECONDS = (3, 10)
 SEND_COOLDOWN_BUFFER_SECONDS = 15
 SEND_RETRYABLE_MARKERS = (
     "rate limited",
@@ -3402,6 +3403,7 @@ class GalleryServer:
                 f"MEDIA:{image_path}",
                 f"{label}图片",
                 required=True,
+                channel=channel,
             )
             if not image_ok:
                 logger.error("%s手动发送失败: 图片未送达，跳过文案发送", label)
@@ -3417,6 +3419,7 @@ class GalleryServer:
                     caption,
                     f"{label}文案",
                     required=False,
+                    channel=channel,
                 )
         return image_ok if not caption_ok else True
 
@@ -3492,14 +3495,17 @@ class GalleryServer:
         message: str,
         label: str,
         required: bool = True,
+        channel: str = "wechat",
     ) -> bool:
         attempts = 1 + len(SEND_RETRY_DELAYS_SECONDS)
         last_output = ""
         retry_after = 0.0
+        channel = normalize_push_channel(channel)
         for attempt_idx in range(attempts):
             attempt_no = attempt_idx + 1
             if attempt_idx:
                 delay = retry_after or SEND_RETRY_DELAYS_SECONDS[attempt_idx - 1]
+                retry_after = 0.0
                 logger.info("%s发送重试等待 %ss (%s/%s)", label, delay, attempt_no, attempts)
                 await asyncio.sleep(delay)
             await self._wait_manual_send_cooldown(label)
@@ -3541,11 +3547,17 @@ class GalleryServer:
                     last_output,
                 )
                 return False
-            retryable = self._is_retryable_send_error(last_output)
+            telegram_connect_error = (
+                channel == "telegram"
+                and self._is_telegram_connect_error(last_output)
+            )
+            retryable = telegram_connect_error or self._is_retryable_send_error(last_output)
             cooldown_seconds = self._extract_send_cooldown_seconds(last_output)
             if cooldown_seconds:
                 retry_after = max(1.0, cooldown_seconds + SEND_COOLDOWN_BUFFER_SECONDS)
                 self._mark_manual_send_cooldown(retry_after)
+            elif telegram_connect_error and attempt_no < attempts:
+                retry_after = float(SEND_TELEGRAM_CONNECT_RETRY_DELAYS_SECONDS[attempt_idx])
             elif retryable and attempt_no < attempts:
                 retry_after = float(SEND_RETRY_DELAYS_SECONDS[attempt_idx])
             log_fn = logger.warning if (retryable and attempt_no < attempts) or not required else logger.error
@@ -3600,6 +3612,14 @@ class GalleryServer:
             return False
         text = (output or "").lower()
         return any(marker in text for marker in SEND_RETRYABLE_MARKERS)
+
+    @staticmethod
+    def _is_telegram_connect_error(output: str) -> bool:
+        text = (output or "").lower()
+        return any(
+            marker in text
+            for marker in ("httpx.connecterror", "httpcore.connecterror")
+        )
 
     @staticmethod
     def _extract_send_cooldown_seconds(output: str) -> float:

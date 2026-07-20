@@ -98,6 +98,7 @@ WECHAT_CAPTION_DELAY_SECONDS = 45
 WECHAT_SEND_TIMEOUT_SECONDS = 90
 PHOTO_JOB_INFLIGHT_STALE_GRACE_SECONDS = 120
 WECHAT_RETRY_DELAYS_SECONDS = (60, 180)
+TELEGRAM_CONNECT_RETRY_DELAYS_SECONDS = (3, 10)
 WECHAT_COOLDOWN_BUFFER_SECONDS = 15
 PHOTO_JOB_MISFIRE_GRACE_SECONDS = 10 * 60
 SCHEDULE_GENERATION_DEFAULT_START_MINUTE = 3 * 60
@@ -4235,6 +4236,7 @@ class PortraitGalleryApp:
                 f"MEDIA:{image_path}",
                 f"{label}图片",
                 required=True,
+                channel=channel,
             )
             if not image_ok:
                 logger.error(f"{label}发送失败: 图片未送达，跳过文案发送")
@@ -4253,6 +4255,7 @@ class PortraitGalleryApp:
                     caption,
                     f"{label}文案",
                     required=False,
+                    channel=channel,
                 )
 
         if image_ok and caption_ok:
@@ -4349,16 +4352,19 @@ class PortraitGalleryApp:
         message: str,
         label: str,
         required: bool = True,
+        channel: str = "wechat",
     ) -> bool:
         """Run `hermes send` with outer retry/backoff for Weixin rate limits."""
         attempts = 1 + len(WECHAT_RETRY_DELAYS_SECONDS)
         last_output = ""
         retry_after = 0.0
+        channel = normalize_push_channel(channel)
 
         for attempt_idx in range(attempts):
             attempt_no = attempt_idx + 1
             if attempt_idx:
                 delay = retry_after or WECHAT_RETRY_DELAYS_SECONDS[attempt_idx - 1]
+                retry_after = 0.0
                 logger.info(f"{label}发送重试等待 {delay}s ({attempt_no}/{attempts})")
                 await asyncio.sleep(delay)
             await self._wait_hermes_send_cooldown(label)
@@ -4400,11 +4406,17 @@ class PortraitGalleryApp:
                 )
                 self._last_delivery_error = last_output
                 return False
-            retryable = self._is_retryable_wechat_error(last_output)
+            telegram_connect_error = (
+                channel == "telegram"
+                and self._is_telegram_connect_error(last_output)
+            )
+            retryable = telegram_connect_error or self._is_retryable_wechat_error(last_output)
             cooldown_seconds = self._extract_wechat_cooldown_seconds(last_output)
             if cooldown_seconds:
                 retry_after = max(1.0, cooldown_seconds + WECHAT_COOLDOWN_BUFFER_SECONDS)
                 self._mark_hermes_send_cooldown(retry_after)
+            elif telegram_connect_error and attempt_no < attempts:
+                retry_after = float(TELEGRAM_CONNECT_RETRY_DELAYS_SECONDS[attempt_idx])
             elif retryable and attempt_no < attempts:
                 retry_after = float(WECHAT_RETRY_DELAYS_SECONDS[attempt_idx])
             log_fn = logger.warning if (retryable and attempt_no < attempts) or not required else logger.error
@@ -4458,6 +4470,14 @@ class PortraitGalleryApp:
             return False
         text = (output or "").lower()
         return any(marker in text for marker in WECHAT_RETRYABLE_MARKERS)
+
+    @staticmethod
+    def _is_telegram_connect_error(output: str) -> bool:
+        text = (output or "").lower()
+        return any(
+            marker in text
+            for marker in ("httpx.connecterror", "httpcore.connecterror")
+        )
 
     @staticmethod
     def _extract_wechat_cooldown_seconds(output: str) -> float:
