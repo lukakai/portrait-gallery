@@ -1,3 +1,4 @@
+import inspect
 import sys
 import tempfile
 import unittest
@@ -32,6 +33,23 @@ class SchedulerRetryTest(unittest.IsolatedAsyncioTestCase):
             "api_key": "secret",
             "models": ["deepseek-test"],
         }
+
+    def test_default_schedule_timeout_is_180_seconds(self):
+        timeout = inspect.signature(DailyScheduler._call_llm).parameters["timeout"].default
+        self.assertEqual(180, timeout)
+
+    async def test_json_repair_uses_schedule_timeout(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            scheduler = DailyScheduler({}, tmpdir)
+            scheduler._call_llm = AsyncMock(return_value=None)
+
+            result = await scheduler._repair_schedule_json("prompt", "bad", 1)
+
+            self.assertIsNone(result)
+            self.assertEqual(
+                180,
+                scheduler._call_llm.await_args.kwargs["timeout"],
+            )
 
     async def test_network_failure_uses_only_configured_attempt_count(self):
         with tempfile.TemporaryDirectory() as tmpdir:

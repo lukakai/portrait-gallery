@@ -37,6 +37,7 @@ class GptImageNoChatTest(unittest.TestCase):
                     None,
                     "https://example.test/v1",
                     precise_edit=False,
+                    ref_images=None,
                 )
                 post.assert_not_called()
 
