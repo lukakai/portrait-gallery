@@ -386,7 +386,7 @@ class ScheduleDiversityTest(unittest.TestCase):
                 "",
             )
 
-            self.assertIn("近 3 天完整日程动作", prompt)
+            self.assertIn("近 7 天完整日程动作", prompt)
             self.assertIn("双保障第 1 层", prompt)
             self.assertIn("去楼下便利店买气泡水", prompt)
             self.assertIn("同义改写、换说法、换时间点、换地点词仍算重复", prompt)
